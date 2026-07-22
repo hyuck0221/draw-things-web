@@ -16,7 +16,7 @@ await build({
   target: 'node22',
   format: 'esm',
   treeShaking: true,
-  legalComments: 'none',
+  legalComments: 'inline',
   minify: false,
   sourcemap: false,
   banner: { js: '#!/usr/bin/env node' },

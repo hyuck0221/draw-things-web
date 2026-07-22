@@ -1,9 +1,10 @@
 import { Image as ImageIcon, LoaderCircle, Maximize, RefreshCw, SlidersHorizontal, Sparkles, WandSparkles } from 'lucide-react'
-import type { CanvasItem, DrawThingsModel, GenerationParameters, ParameterValue } from '../domain/types'
+import type { ApiProtocol, CanvasItem, DrawThingsModel, GenerationParameters, ParameterValue } from '../domain/types'
 import { SAMPLERS } from '../lib/draw-things/parameters'
 import { Button, Field, IconButton, TextInput, Toggle } from './ui'
 
 interface InspectorPanelProps {
+  protocol: ApiProtocol
   selected?: CanvasItem
   parameters: GenerationParameters
   models: DrawThingsModel[]
@@ -21,7 +22,8 @@ function number(eventValue: string) {
   return Number.isFinite(value) ? value : 0
 }
 
-export function InspectorPanel({ selected, parameters, models, modelsLoading, modelsMessage, onRefreshModels, onChange, onOpenAll, onUseSelected, useSelected }: InspectorPanelProps) {
+export function InspectorPanel({ protocol, selected, parameters, models, modelsLoading, modelsMessage, onRefreshModels, onChange, onOpenAll, onUseSelected, useSelected }: InspectorPanelProps) {
+  const maximumDimension = protocol === 'grpc' ? 4_096 : 8_192
   return (
     <aside className="inspector-panel">
       <header><span className="eyebrow"><WandSparkles size={13} /> GENERATION</span><h2>생성 설정</h2></header>
@@ -56,11 +58,11 @@ export function InspectorPanel({ selected, parameters, models, modelsLoading, mo
         </section>
 
         <section className="inspector-section">
-          <div className="inspector-section__title"><span><Maximize size={15} /> 이미지</span><small>64px 단위</small></div>
+          <div className="inspector-section__title"><span><Maximize size={15} /> 이미지</span><small>64px 단위 · 최대 {maximumDimension}</small></div>
           <div className="size-grid">
-            <Field label="너비"><TextInput type="number" min="128" max="8192" step="64" value={Number(parameters.width ?? 1024)} onChange={(event) => onChange('width', number(event.target.value))} /></Field>
+            <Field label="너비"><TextInput type="number" min="128" max={maximumDimension} step="64" value={Number(parameters.width ?? 1024)} onChange={(event) => onChange('width', number(event.target.value))} /></Field>
             <span>×</span>
-            <Field label="높이"><TextInput type="number" min="128" max="8192" step="64" value={Number(parameters.height ?? 1024)} onChange={(event) => onChange('height', number(event.target.value))} /></Field>
+            <Field label="높이"><TextInput type="number" min="128" max={maximumDimension} step="64" value={Number(parameters.height ?? 1024)} onChange={(event) => onChange('height', number(event.target.value))} /></Field>
           </div>
           <div className="aspect-presets">
             {[['1:1', 1024, 1024], ['4:5', 896, 1152], ['3:4', 896, 1216], ['16:9', 1344, 768]].map(([label, width, height]) => (
@@ -84,7 +86,7 @@ export function InspectorPanel({ selected, parameters, models, modelsLoading, mo
           <Toggle label="타일 디코딩" description="큰 이미지의 메모리 사용 감소" checked={Boolean(parameters.tiled_decoding)} onChange={(value) => onChange('tiled_decoding', value)} />
         </section>
       </div>
-      <footer><Button variant="secondary" onClick={onOpenAll}><SlidersHorizontal size={15} /> 전체 84개 설정</Button></footer>
+      <footer><Button variant="secondary" onClick={onOpenAll}><SlidersHorizontal size={15} /> 전체 API 설정</Button></footer>
     </aside>
   )
 }

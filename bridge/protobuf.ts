@@ -27,9 +27,47 @@ function encodeStringField(field: number, value: string): Buffer {
   return Buffer.concat([encodeVarint((field << 3) | 2), encodeVarint(bytes.length), bytes])
 }
 
+function encodeBytesField(field: number, value: Buffer): Buffer {
+  return Buffer.concat([encodeVarint((field << 3) | 2), encodeVarint(value.length), value])
+}
+
+function encodeVarintField(field: number, value: number | bigint): Buffer {
+  return Buffer.concat([encodeVarint(field << 3), encodeVarint(value)])
+}
+
 export function encodeEchoRequest(name: string, sharedSecret?: string): Buffer {
   const fields = [encodeStringField(1, name)]
   if (sharedSecret !== undefined) fields.push(encodeStringField(2, sharedSecret))
+  return Buffer.concat(fields)
+}
+
+export interface ImageGenerationRequestInput {
+  prompt: string
+  negativePrompt: string
+  configuration: Buffer
+  user: string
+  sharedSecret?: string
+  chunked?: boolean
+}
+
+export function encodeImageGenerationRequest(input: ImageGenerationRequestInput): Buffer {
+  if (Buffer.byteLength(input.prompt, 'utf8') > 1024 * 1024
+    || Buffer.byteLength(input.negativePrompt, 'utf8') > 1024 * 1024) {
+    throw new BridgeError('GRPC_PROMPT_TOO_LARGE', 'gRPC prompts are limited to 1 MiB each.', 413)
+  }
+  if (input.configuration.length === 0 || input.configuration.length > 4 * 1024 * 1024) {
+    throw new BridgeError('GRPC_CONFIGURATION_TOO_LARGE', 'gRPC configuration is empty or too large.', 413)
+  }
+  const fields = [
+    encodeVarintField(2, 1),
+    ...(input.prompt ? [encodeStringField(5, input.prompt)] : []),
+    ...(input.negativePrompt ? [encodeStringField(6, input.negativePrompt)] : []),
+    encodeBytesField(7, input.configuration),
+    encodeStringField(10, input.user),
+    encodeVarintField(11, 2), // DeviceType.LAPTOP
+    ...(input.sharedSecret ? [encodeStringField(13, input.sharedSecret)] : []),
+    ...(input.chunked === false ? [] : [encodeVarintField(14, 1)]),
+  ]
   return Buffer.concat(fields)
 }
 
@@ -158,6 +196,7 @@ export function decodeEchoReply(buffer: Buffer): EchoReplyDecoded {
     message: '',
     files: [],
     metadata: { ...EMPTY_METADATA },
+    modelBrowsingAvailable: false,
     sharedSecretMissing: false,
     serverIdentifier: '0',
   }
@@ -169,8 +208,10 @@ export function decodeEchoReply(buffer: Buffer): EchoReplyDecoded {
     if (field === 1 && wireType === 2) {
       result.message = readLengthDelimited(buffer, cursor).toString('utf8')
     } else if (field === 2 && wireType === 2) {
+      result.modelBrowsingAvailable = true
       result.files.push(readLengthDelimited(buffer, cursor).toString('utf8'))
     } else if (field === 3 && wireType === 2) {
+      result.modelBrowsingAvailable = true
       result.metadata = decodeMetadataOverride(readLengthDelimited(buffer, cursor))
     } else if (field === 4 && wireType === 0) {
       result.sharedSecretMissing = readVarint(buffer, cursor) !== 0n
@@ -183,6 +224,182 @@ export function decodeEchoReply(buffer: Buffer): EchoReplyDecoded {
     }
   }
   return result
+}
+
+export interface GrpcGenerationSignpost {
+  phase:
+    | 'text-encoded'
+    | 'image-encoded'
+    | 'sampling'
+    | 'image-decoded'
+    | 'second-pass-image-encoded'
+    | 'second-pass-sampling'
+    | 'second-pass-image-decoded'
+    | 'face-restored'
+    | 'image-upscaled'
+    | 'unknown'
+  step?: number
+}
+
+export interface ImageGenerationResponseDecoded {
+  generatedImages: Buffer[]
+  currentSignpost?: GrpcGenerationSignpost
+  previewImage?: Buffer
+  scaleFactor?: number
+  downloadSize?: number | string
+  chunkState: 'last' | 'more' | 'unknown'
+}
+
+function decodeSignpost(buffer: Buffer): GrpcGenerationSignpost {
+  const phases: Record<number, GrpcGenerationSignpost['phase']> = {
+    1: 'text-encoded',
+    2: 'image-encoded',
+    3: 'sampling',
+    4: 'image-decoded',
+    5: 'second-pass-image-encoded',
+    6: 'second-pass-sampling',
+    7: 'second-pass-image-decoded',
+    8: 'face-restored',
+    9: 'image-upscaled',
+  }
+  const cursor: Cursor = { offset: 0 }
+  let result: GrpcGenerationSignpost = { phase: 'unknown' }
+  while (cursor.offset < buffer.length) {
+    const tag = Number(readVarint(buffer, cursor))
+    const field = tag >>> 3
+    const wireType = tag & 7
+    if (wireType !== 2 || field < 1 || field > 9) {
+      skipField(buffer, cursor, wireType)
+      continue
+    }
+    const value = readLengthDelimited(buffer, cursor)
+    result = { phase: phases[field] ?? 'unknown' }
+    if (field === 3 || field === 6) {
+      const samplingCursor: Cursor = { offset: 0 }
+      while (samplingCursor.offset < value.length) {
+        const samplingTag = Number(readVarint(value, samplingCursor))
+        const samplingField = samplingTag >>> 3
+        const samplingWireType = samplingTag & 7
+        if (samplingField === 1 && samplingWireType === 0) {
+          result.step = Number(readVarint(value, samplingCursor))
+        } else {
+          skipField(value, samplingCursor, samplingWireType)
+        }
+      }
+    }
+  }
+  return result
+}
+
+export function decodeImageGenerationResponse(buffer: Buffer): ImageGenerationResponseDecoded {
+  const result: ImageGenerationResponseDecoded = { generatedImages: [], chunkState: 'last' }
+  const cursor: Cursor = { offset: 0 }
+  while (cursor.offset < buffer.length) {
+    const tag = Number(readVarint(buffer, cursor))
+    const field = tag >>> 3
+    const wireType = tag & 7
+    if (field === 1 && wireType === 2) {
+      result.generatedImages.push(Buffer.from(readLengthDelimited(buffer, cursor)))
+    } else if (field === 2 && wireType === 2) {
+      result.currentSignpost = decodeSignpost(readLengthDelimited(buffer, cursor))
+    } else if (field === 4 && wireType === 2) {
+      result.previewImage = Buffer.from(readLengthDelimited(buffer, cursor))
+    } else if (field === 5 && wireType === 0) {
+      result.scaleFactor = Number(readVarint(buffer, cursor))
+    } else if (field === 7 && wireType === 0) {
+      result.downloadSize = bigintToJson(readVarint(buffer, cursor))
+    } else if (field === 8 && wireType === 0) {
+      const state = Number(readVarint(buffer, cursor))
+      result.chunkState = state === 0 ? 'last' : state === 1 ? 'more' : 'unknown'
+    } else {
+      skipField(buffer, cursor, wireType)
+    }
+  }
+  return result
+}
+
+export class GrpcFrameDecoder {
+  private readonly header = Buffer.allocUnsafe(5)
+  private headerBytes = 0
+  private compressed = 0
+  private payload: Buffer | undefined
+  private payloadBytes = 0
+
+  constructor(
+    private readonly encoding: string | undefined,
+    private readonly maximumMessageBytes = 128 * 1024 * 1024,
+  ) {}
+
+  push(chunk: Buffer): Buffer[] {
+    const frames: Buffer[] = []
+    let offset = 0
+
+    while (offset < chunk.length) {
+      if (this.headerBytes < this.header.length) {
+        const headerBytes = Math.min(this.header.length - this.headerBytes, chunk.length - offset)
+        chunk.copy(this.header, this.headerBytes, offset, offset + headerBytes)
+        this.headerBytes += headerBytes
+        offset += headerBytes
+        if (this.headerBytes < this.header.length) break
+
+        this.compressed = this.header[0]!
+        const length = this.header.readUInt32BE(1)
+        if (length > this.maximumMessageBytes) {
+          throw new BridgeError('GRPC_FRAME_ERROR', 'Oversized gRPC message.', 502)
+        }
+        this.payload = Buffer.allocUnsafe(length)
+        this.payloadBytes = 0
+        if (length === 0) {
+          frames.push(decodeGrpcPayload(this.compressed, this.payload, this.encoding, this.maximumMessageBytes))
+          this.resetFrame()
+          continue
+        }
+      }
+
+      const payload = this.payload
+      if (!payload) throw new BridgeError('GRPC_FRAME_ERROR', 'Invalid gRPC decoder state.', 502)
+      const payloadBytes = Math.min(payload.length - this.payloadBytes, chunk.length - offset)
+      chunk.copy(payload, this.payloadBytes, offset, offset + payloadBytes)
+      this.payloadBytes += payloadBytes
+      offset += payloadBytes
+      if (this.payloadBytes === payload.length) {
+        frames.push(decodeGrpcPayload(this.compressed, payload, this.encoding, this.maximumMessageBytes))
+        this.resetFrame()
+      }
+    }
+
+    return frames
+  }
+
+  finish(): void {
+    if (this.headerBytes !== 0 || this.payload !== undefined) {
+      throw new BridgeError('GRPC_FRAME_ERROR', 'Draw Things ended with a truncated gRPC frame.', 502)
+    }
+  }
+
+  private resetFrame(): void {
+    this.headerBytes = 0
+    this.compressed = 0
+    this.payload = undefined
+    this.payloadBytes = 0
+  }
+}
+
+function decodeGrpcPayload(
+  compressed: number,
+  payload: Buffer,
+  encoding: string | undefined,
+  maximumMessageBytes: number,
+): Buffer {
+  if (compressed === 0) return payload
+  if (compressed === 1 && encoding?.toLowerCase() === 'gzip') {
+    return gunzipSync(payload, { maxOutputLength: maximumMessageBytes })
+  }
+  throw new BridgeError(
+    'GRPC_COMPRESSION_UNSUPPORTED',
+    `Unsupported gRPC compression encoding: ${encoding ?? 'missing'}.`,
+    502,
+  )
 }
 
 export function frameGrpcMessage(payload: Buffer): Buffer {
@@ -211,19 +428,7 @@ export function decodeGrpcFrames(
     }
     const payload = data.subarray(offset, offset + length)
     offset += length
-    if (compressed === 0) {
-      frames.push(payload)
-    } else if (compressed === 1 && encoding?.toLowerCase() === 'gzip') {
-      const decompressed = gunzipSync(payload, { maxOutputLength: maximumMessageBytes })
-      frames.push(decompressed)
-    } else {
-      throw new BridgeError(
-        'GRPC_COMPRESSION_UNSUPPORTED',
-        `Unsupported gRPC compression encoding: ${encoding ?? 'missing'}.`,
-        502,
-      )
-    }
+    frames.push(decodeGrpcPayload(compressed, payload, encoding, maximumMessageBytes))
   }
   return frames
 }
-

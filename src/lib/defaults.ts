@@ -73,6 +73,7 @@ export const DEFAULT_PARAMETERS: GenerationParameters = {
   guiding_frame_noise: 0.02,
   start_frame_guidance: 1,
   shift: 1,
+  stage_2_steps: 10,
   stage_2_guidance: 1,
   stage_2_shift: 1,
   loras: [],
@@ -109,6 +110,7 @@ export const DEFAULT_PARAMETERS: GenerationParameters = {
   color_calibration: 'none',
   expand_prompt_to_json: false,
   restore_faces: false,
+  face_restoration: '',
 }
 
 export const EMPTY_CAPABILITIES: ServerCapabilities = {

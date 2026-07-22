@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { echoGrpc } from './grpc.ts'
+import { echoGrpc, generateGrpcImages, type GrpcGenerationProgress } from './grpc.ts'
 import { generateHttpImages, getHttpOptions } from './http-upstream.ts'
 import { defaultDrawThingsModelDirectories, listLocalDrawThingsModels } from './model-catalog.ts'
 import {
@@ -162,7 +162,7 @@ function frontendCapabilities(probe: ProbeResult) {
       canStreamProgress: false,
       canCancel: false,
       canBrowseModels: false,
-      requiresHttpModeForCanvas: probe.protocol === 'grpc',
+      requiresHttpModeForCanvas: false,
       sharedSecretRequired: false,
       models: [],
       loras: [],
@@ -193,23 +193,26 @@ function frontendCapabilities(probe: ProbeResult) {
   }
 
   const metadata = probe.echo?.metadata
+  const authenticated = probe.echo?.sharedSecretMissing !== true
   let models = metadataArray(metadata?.models)
   if (models.length === 0) models = (probe.echo?.files ?? []).map((file) => ({ file }))
   return {
     protocol: 'grpc' as const,
-    canGenerate: false,
+    canGenerate: authenticated,
     canImageToImage: false,
-    canStreamProgress: false,
-    canCancel: false,
+    canStreamProgress: authenticated,
+    canCancel: authenticated,
     canBrowseModels: probe.capabilities.modelBrowsing,
-    requiresHttpModeForCanvas: true,
+    requiresHttpModeForCanvas: false,
     sharedSecretRequired: probe.echo?.sharedSecretMissing ?? false,
     models,
     loras: metadataArray(metadata?.loras),
     controls: metadataArray(metadata?.controlNets),
     textualInversions: metadataArray(metadata?.textualInversions),
     serverIdentifier: probe.echo?.serverIdentifier,
-    limitations: [probe.capabilities.reason ?? '이미지 캔버스 생성에는 Draw Things HTTP API 모드가 필요합니다.'],
+    limitations: [probe.capabilities.reason ?? (authenticated
+      ? 'gRPC txt2img는 사용할 수 있습니다. img2img와 이미지 힌트 기반 ControlNet/IP-Adapter는 아직 HTTP 모드가 필요합니다.'
+      : 'Draw Things가 공유 비밀을 요구합니다. 동일한 sharedSecret을 입력한 뒤 다시 연결하세요.')],
   }
 }
 
@@ -239,7 +242,9 @@ function connectionTestResult(probe: ProbeResult) {
     checkedAt,
     phase: 'online',
     message: grpc
-      ? 'Draw Things gRPC에 연결했습니다. 캔버스 생성에는 API 서버를 HTTP 모드로 전환하세요.'
+      ? probe.echo?.sharedSecretMissing
+        ? 'Draw Things gRPC에 연결했지만 공유 비밀이 필요합니다. sharedSecret을 입력한 뒤 다시 연결하세요.'
+        : 'Draw Things gRPC에 연결했습니다. 텍스트 이미지 생성과 진행률·취소를 사용할 수 있습니다.'
       : 'Draw Things HTTP API에 연결했습니다.',
     endpoint,
     ...(probe.echo?.message ? { serverMessage: probe.echo.message } : {}),
@@ -279,8 +284,14 @@ export async function probeConnection(connection: NormalizedConnection): Promise
     const warnings = [...result.warnings]
     if (result.echo.sharedSecretMissing) {
       warnings.push('Draw Things requires a matching sharedSecret before model metadata can be browsed.')
+    } else if (!result.echo.modelBrowsingAvailable) {
+      warnings.push('Draw Things model browsing is disabled; enable it in the app API settings to expose installed models.')
     }
-    const reason = 'Native gRPC generation uses Draw Things FlatBuffer configuration and proprietary tensor payloads. Switch Draw Things API Server to HTTP mode for txt2img/img2img generation from this web connector.'
+    const authenticated = !result.echo.sharedSecretMissing
+    const modelBrowsing = authenticated && result.echo.modelBrowsingAvailable
+    const reason = authenticated
+      ? `Draw Things gRPC txt2img is supported.${modelBrowsing ? '' : ' Model browsing is disabled in Draw Things.'} gRPC img2img and image-hint ControlNet/IP-Adapter are intentionally unavailable until image/mask/hint/content tensor upload is verified; use HTTP mode for those input-based modes.`
+      : 'Draw Things requires a matching sharedSecret before generation or model browsing can be used.'
     const success: ProbeSuccess = {
       ok: true,
       protocol: 'grpc',
@@ -288,10 +299,10 @@ export async function probeConnection(connection: NormalizedConnection): Promise
       connection: publicConnection(connection),
       capabilities: {
         options: true,
-        modelBrowsing: !result.echo.sharedSecretMissing,
-        generation: false,
-        generationTransport: null,
-        txt2img: false,
+        modelBrowsing,
+        generation: authenticated,
+        generationTransport: authenticated ? 'grpc' : null,
+        txt2img: authenticated,
         img2img: false,
         reason,
       },
@@ -379,11 +390,16 @@ async function handleOptions(request: IncomingMessage, response: ServerResponse)
 
 function modelMetadata(value: unknown): Record<string, unknown> | undefined {
   if (!isPlainObject(value) || typeof value.file !== 'string' || !value.file.trim()) return undefined
+  const defaultScale = Number(value.defaultScale)
   return {
     file: value.file.trim(),
     ...(typeof value.name === 'string' && value.name.trim() ? { name: value.name.trim() } : {}),
     ...(typeof value.version === 'string' && value.version.trim() ? { version: value.version.trim() } : {}),
     ...(typeof value.modifier === 'string' && value.modifier.trim() ? { modifier: value.modifier.trim() } : {}),
+    ...(Number.isInteger(defaultScale) && defaultScale >= 2 && defaultScale <= 128 ? { defaultScale } : {}),
+    ...(value.source === 'local-metadata' && isPlainObject(value.recommendedSettings)
+      ? { recommendedSettings: value.recommendedSettings }
+      : {}),
     ...(typeof value.source === 'string' ? { source: value.source } : {}),
   }
 }
@@ -393,8 +409,13 @@ async function handleModels(
   response: ServerResponse,
   modelDirectories?: readonly string[],
 ): Promise<void> {
-  const { connection } = getConnectionBody(await readJsonBody(request, MAX_CONTROL_BODY_BYTES))
-  const local = await listLocalDrawThingsModels(modelDirectories)
+  const { body, connection } = getConnectionBody(await readJsonBody(request, MAX_CONTROL_BODY_BYTES))
+  const selectedLoRAs = body.selectedLoRAs === undefined ? [] : body.selectedLoRAs
+  if (!Array.isArray(selectedLoRAs) || selectedLoRAs.length > 64
+    || selectedLoRAs.some((value) => typeof value !== 'string' || value.length > 4_096)) {
+    throw new BridgeError('INVALID_MODEL_REQUEST', 'selectedLoRAs must contain at most 64 bounded filenames.')
+  }
+  const local = await listLocalDrawThingsModels(modelDirectories, selectedLoRAs)
   const models = new Map<string, Record<string, unknown>>()
   const sources = new Set<string>()
   for (const value of local.models) {
@@ -411,7 +432,15 @@ async function handleModels(
       const echoModels = metadataArray(probe.echo?.metadata.models)
       for (const value of echoModels) {
         const model = modelMetadata({ ...value, source: 'grpc-echo' })
-        if (model) models.set(String(model.file), model)
+        if (model) {
+          const key = String(model.file)
+          const localModel = models.get(key)
+          models.set(key, {
+            ...localModel,
+            ...model,
+            ...(localModel?.recommendedSettings ? { recommendedSettings: localModel.recommendedSettings } : {}),
+          })
+        }
       }
       if (echoModels.length > 0) sources.add('grpc-echo')
       warnings.push(...probe.warnings)
@@ -458,6 +487,8 @@ const HTTP_UNWRITABLE_PARAMETERS = new Set([
   'compression_artifacts_quality',
   'color_calibration',
   'expand_prompt_to_json',
+  'stage_2_steps',
+  'face_restoration',
 ])
 
 function safeHttpParameters(parameters: Record<string, unknown>): Record<string, unknown> {
@@ -469,12 +500,27 @@ function safeHttpParameters(parameters: Record<string, unknown>): Record<string,
   }))
 }
 
+const GRPC_UNSUPPORTED_PARAMETERS = new Set(['restore_faces', 'controls'])
+
+function safeGrpcParameters(parameters: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(
+    Object.entries(parameters).filter(([key]) => !GRPC_UNSUPPORTED_PARAMETERS.has(key)),
+  )
+}
+
+function safeProtocolParameters(
+  parameters: Record<string, unknown>,
+  protocol: 'http' | 'grpc',
+): Record<string, unknown> {
+  return protocol === 'http' ? safeHttpParameters(parameters) : safeGrpcParameters(parameters)
+}
+
 function stripDataUrl(value: string): string {
   const comma = value.indexOf(',')
   return value.startsWith('data:') && comma >= 0 ? value.slice(comma + 1) : value
 }
 
-function generationInput(body: Record<string, unknown>): {
+function generationInput(body: Record<string, unknown>, protocol: 'http' | 'grpc'): {
   id: string
   mode: 'txt2img' | 'img2img'
   parameters: Record<string, unknown>
@@ -491,7 +537,7 @@ function generationInput(body: Record<string, unknown>): {
       throw new BridgeError('INVALID_PROMPT', 'request.prompt and request.negativePrompt must be strings.')
     }
     const parameters: Record<string, unknown> = {
-      ...safeHttpParameters(request.parameters),
+      ...safeProtocolParameters(request.parameters, protocol),
       prompt: request.prompt,
       negative_prompt: request.negativePrompt,
     }
@@ -517,7 +563,7 @@ function generationInput(body: Record<string, unknown>): {
   return {
     id: generationId(body.id),
     mode: body.mode,
-    parameters: body.parameters,
+    parameters: safeProtocolParameters(body.parameters, protocol),
   }
 }
 
@@ -558,15 +604,15 @@ async function handleGenerate(
     await readJsonBody(request, MAX_GENERATE_BODY_BYTES),
     'generation',
   )
-  if (connection.protocol !== 'http') {
+  const { id, mode, parameters } = generationInput(body, connection.protocol)
+  if (connection.protocol === 'grpc' && mode === 'img2img') {
     throw new BridgeError(
-      'HTTP_MODE_REQUIRED',
-      'Native gRPC image generation is not exposed because Draw Things uses a proprietary tensor/FlatBuffer payload. Switch the Draw Things API Server protocol to HTTP.',
+      'GRPC_IMG2IMG_NOT_IMPLEMENTED',
+      'gRPC image-to-image input is not available yet. Switch Draw Things to HTTP mode for img2img, or use txt2img over gRPC.',
       409,
-      { generationTransport: 'http' },
+      { generationTransport: 'grpc', supportedModes: ['txt2img'] },
     )
   }
-  const { id, mode, parameters } = generationInput(body)
   if (active.has(id)) throw new BridgeError('GENERATION_ID_IN_USE', 'A generation with this id is already active.', 409)
 
   const state: ActiveGeneration = { controller: new AbortController(), cancelled: false }
@@ -601,7 +647,52 @@ async function handleGenerate(
     }, 15_000)
     heartbeat.unref()
 
-    const result = await generateHttpImages(connection, mode, parameters, state.controller.signal)
+    const emitGrpcProgress = async (progress: GrpcGenerationProgress) => {
+      if (state.controller.signal.aborted || completed) return
+      if (progress.previewImage) {
+        await writeNdjson(response, {
+          type: 'preview',
+          requestId: id,
+          image: progress.previewImage,
+        })
+      }
+      if (state.controller.signal.aborted || completed) return
+      if (!progress.signpost && progress.downloadSize === undefined) return
+      const signpost = progress.signpost
+      const firstPassSteps = Number.isInteger(Number(parameters.steps)) && Number(parameters.steps) > 0
+        ? Number(parameters.steps)
+        : 16
+      const secondPassSteps = Number.isInteger(Number(parameters.stage_2_steps)) && Number(parameters.stage_2_steps) > 0
+        ? Number(parameters.stage_2_steps)
+        : 10
+      const secondPass = signpost?.phase === 'second-pass-sampling'
+      const totalSteps = secondPass ? secondPassSteps : firstPassSteps
+      const step = signpost?.step
+      const progressValue = step === undefined
+        ? progress.downloadSize !== undefined ? 96 : 8
+        : Math.min(94, Math.max(8, Math.round((step / Math.max(1, totalSteps)) * 84 + 8)))
+      await writeNdjson(response, {
+        type: 'progress',
+        requestId: id,
+        progress: progressValue,
+        ...(step === undefined ? {} : { step, totalSteps }),
+        message: progress.downloadSize !== undefined
+          ? '생성 결과를 전송하고 있습니다…'
+          : signpost?.phase === 'sampling' || signpost?.phase === 'second-pass-sampling'
+            ? `샘플링 ${step ?? ''}/${totalSteps}`
+            : 'Draw Things에서 이미지를 처리하고 있습니다…',
+      })
+    }
+    const result = connection.protocol === 'http'
+      ? await generateHttpImages(connection, mode, parameters, state.controller.signal)
+      : await generateGrpcImages(
+          connection,
+          typeof parameters.prompt === 'string' ? parameters.prompt : '',
+          typeof parameters.negative_prompt === 'string' ? parameters.negative_prompt : '',
+          parameters,
+          state.controller.signal,
+          emitGrpcProgress,
+        )
     await writeNdjson(response, {
       type: 'result',
       requestId: id,

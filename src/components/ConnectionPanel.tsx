@@ -112,6 +112,7 @@ export function ConnectionPanel({
       return false
     }
   }, [pageUrl])
+  const remoteBridgeSetup = secureHostedPage || Boolean(tailscaleHost)
   const bridgeEndpoint = useMemo(() => {
     try {
       return new URL(draft.bridgeUrl)
@@ -252,18 +253,28 @@ export function ConnectionPanel({
                 </div>
               ) : null}
 
-              {secureHostedPage && draft.transport === 'bridge' ? (
+              {remoteBridgeSetup && draft.transport === 'bridge' ? (
                 <div className="remote-bridge-setup">
-                  <div className={`notice ${bridgeUsesLoopback ? 'notice--warning' : 'notice--info'}`}>
-                    {bridgeUsesLoopback ? <AlertTriangle size={17} /> : <ShieldCheck size={17} />}
-                    <p>
-                      <strong>{bridgeUsesLoopback ? '휴대폰의 127.0.0.1은 Mac이 아닙니다.' : '다른 기기용 HTTPS 커넥터 주소를 사용합니다.'}</strong>
-                      Mac에서 이 사이트를 열 때는 루프백 주소가 동작하지만, Android·iPhone에서는 Tailscale Serve 같은 HTTPS 주소가 필요합니다. Android가 로컬 네트워크 접근 권한을 요청하면 허용하세요.
-                    </p>
-                  </div>
+                  {secureHostedPage ? (
+                    <div className={`notice ${bridgeUsesLoopback ? 'notice--warning' : 'notice--info'}`}>
+                      {bridgeUsesLoopback ? <AlertTriangle size={17} /> : <ShieldCheck size={17} />}
+                      <p>
+                        <strong>{bridgeUsesLoopback ? '휴대폰의 127.0.0.1은 Mac이 아닙니다.' : '다른 기기용 HTTPS 커넥터 주소를 사용합니다.'}</strong>
+                        Mac에서 이 사이트를 열 때는 루프백 주소가 동작하지만, Android·iPhone에서는 Tailscale Serve 같은 HTTPS 주소가 필요합니다. Android가 로컬 네트워크 접근 권한을 요청하면 허용하세요.
+                      </p>
+                    </div>
+                  ) : null}
                   <div className="form-grid">
-                    <Field label="휴대폰용 커넥터 HTTPS 주소" hint="예: https://my-mac.my-tailnet.ts.net:47822">
-                      <TextInput value={draft.bridgeUrl} onChange={(event) => update('bridgeUrl', event.target.value)} spellCheck={false} placeholder="https://my-mac.my-tailnet.ts.net:47822" />
+                    <Field
+                      label={secureHostedPage ? '휴대폰용 커넥터 HTTPS 주소' : '커넥터 주소'}
+                      hint={secureHostedPage ? '예: https://my-mac.my-tailnet.ts.net:47822' : `이 Mac의 Tailscale 주소: http://${tailscaleHost}:47821`}
+                    >
+                      <TextInput
+                        value={draft.bridgeUrl}
+                        onChange={(event) => update('bridgeUrl', event.target.value)}
+                        spellCheck={false}
+                        placeholder={secureHostedPage ? 'https://my-mac.my-tailnet.ts.net:47822' : `http://${tailscaleHost}:47821`}
+                      />
                     </Field>
                     <Field label="커넥터 페어링 토큰" hint="Mac에서 실행한 커넥터의 --token 값과 같아야 합니다.">
                       <TextInput type="password" value={draft.bridgePairingToken} onChange={(event) => update('bridgePairingToken', event.target.value)} autoComplete="off" />
@@ -354,14 +365,14 @@ export function ConnectionPanel({
                 }}
                 options={[
                   { value: 'http', label: 'HTTP', badge: '생성' },
-                  { value: 'grpc', label: 'gRPC', badge: '진단' },
+                  { value: 'grpc', label: 'gRPC', badge: 'txt2img' },
                 ]}
               />
 
               {draft.protocol === 'grpc' ? (
                 <div className="notice notice--info">
                   <Info size={17} />
-                  <p><strong>gRPC 연결·TLS·공유 비밀·모델 탐색은 확인할 수 있습니다.</strong> 이미지 결과가 Draw Things 전용 텐서 형식이라 웹 캔버스 생성에는 앱의 HTTP 프로토콜이 필요합니다.</p>
+                  <p><strong>gRPC txt2img와 실시간 진행률·미리보기·취소를 지원합니다.</strong> img2img와 이미지 힌트가 필요한 ControlNet/IP-Adapter는 아직 HTTP 프로토콜에서만 지원됩니다.</p>
                 </div>
               ) : null}
 
@@ -424,7 +435,7 @@ export function ConnectionPanel({
                       <TextInput value={draft.apiBasePath} onChange={(event) => update('apiBasePath', event.target.value)} placeholder="예: proxy/draw-things" />
                     </Field>
                   ) : null}
-                  {draft.transport === 'bridge' && !secureHostedPage ? (
+                  {draft.transport === 'bridge' && !remoteBridgeSetup ? (
                     <>
                       <Field label="커넥터 주소">
                         <TextInput value={draft.bridgeUrl} onChange={(event) => update('bridgeUrl', event.target.value)} spellCheck={false} />

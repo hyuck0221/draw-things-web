@@ -34,6 +34,11 @@ import {
 } from './lib/draw-things/client'
 import { createPairingToken, DEFAULT_PARAMETERS } from './lib/defaults'
 import { PARAMETER_DEFINITIONS } from './lib/draw-things/parameters'
+import {
+  applyRecommendedSettings,
+  didModelTypeChange,
+  readRecommendedSettings,
+} from './lib/draw-things/recommended-settings'
 import { randomUuid } from './lib/ids'
 import { composeEffectivePrompt } from './lib/prompt'
 import { loadPreferences, savePreferences } from './lib/storage'
@@ -195,11 +200,21 @@ export default function App() {
   const selected = activeSession?.items.find((item) => item.id === activeSession.selectedItemId)
   const mode: GenerationMode = selected && useSelected ? 'img2img' : 'txt2img'
   const online = monitor.phase === 'online' && Boolean(monitor.result?.ok)
-  const canGenerate = Boolean(monitor.result?.capabilities.canGenerate)
+  const capabilities = monitor.result?.capabilities
+  const canGenerate = Boolean(capabilities?.canGenerate
+    && (mode === 'txt2img' || capabilities.canImageToImage))
   const models = useMemo(() => {
     const merged = new Map<string, DrawThingsModel>()
     for (const model of [...installedModels, ...(monitor.result?.capabilities.models ?? [])]) {
-      if (model.file) merged.set(model.file, model)
+      if (!model.file) continue
+      const existing = merged.get(model.file)
+      merged.set(model.file, {
+        ...existing,
+        ...model,
+        ...(existing?.recommendedSettings && !model.recommendedSettings
+          ? { recommendedSettings: existing.recommendedSettings }
+          : {}),
+      })
     }
     const current = String(preferences.parameters.model ?? '').trim()
     if (current && !merged.has(current)) merged.set(current, { file: current, name: current })
@@ -213,6 +228,9 @@ export default function App() {
       const result = await listInstalledModels(
         preferences.connection,
         String(preferences.parameters.model ?? ''),
+        (Array.isArray(preferences.parameters.loras) ? preferences.parameters.loras : [])
+          .map((value) => typeof value.file === 'string' ? value.file.trim() : '')
+          .filter(Boolean),
       )
       if (modelRequestSequence.current !== sequence) return
       setInstalledModels(result.models)
@@ -226,7 +244,7 @@ export default function App() {
     } finally {
       if (modelRequestSequence.current === sequence) setModelsLoading(false)
     }
-  }, [preferences.connection, preferences.parameters.model])
+  }, [preferences.connection, preferences.parameters.loras, preferences.parameters.model])
 
   useEffect(() => {
     if (!preferences.connectionConfigured) return
@@ -237,7 +255,49 @@ export default function App() {
     return () => { window.clearTimeout(initial); window.clearInterval(interval) }
   }, [bridge?.ok, online, preferences.connection.transport, preferences.connectionConfigured, refreshModels])
 
+  const changeModel = (nextFile: string) => {
+    const previousFile = String(preferences.parameters.model ?? '')
+    if (previousFile === nextFile) return
+    const previousModel = models.find((model) => model.file === previousFile)
+      ?? (previousFile ? { file: previousFile } : undefined)
+    const nextModel = models.find((model) => model.file === nextFile) ?? { file: nextFile }
+    const recommendation = readRecommendedSettings(nextModel)
+    const typeChanged = didModelTypeChange(previousModel, nextModel)
+
+    if (typeChanged && recommendation) {
+      const displayName = nextModel.name ?? nextModel.file
+      const apply = window.confirm(
+        `“${displayName}”은(는) 다른 모델 유형입니다.\n\n`
+        + `Draw Things 권장 프로필 “${recommendation.profileName}”을 적용할까요?\n`
+        + '확인을 누르면 Draw Things 기본값 위에 현재 크기·시드를 놓은 뒤 권장 프로필 전체를 적용합니다. 프로필이 크기·시드를 지정하면 그 값이 우선합니다. 취소를 누르면 현재 설정을 유지합니다.',
+      )
+      if (apply) {
+        setPreferences((current) => ({
+          ...current,
+          parameters: applyRecommendedSettings(current.parameters, DEFAULT_PARAMETERS, recommendation),
+        }))
+        setAlert({ kind: 'success', message: `“${recommendation.profileName}” 권장 설정을 적용했습니다.` })
+        return
+      }
+    }
+
+    setPreferences((current) => ({
+      ...current,
+      parameters: { ...current.parameters, model: nextFile },
+    }))
+    if (typeChanged && !recommendation) {
+      setAlert({
+        kind: 'error',
+        message: '모델은 변경했지만 로컬 configs.json에서 이 모델 유형의 권장 설정을 찾지 못해 현재 설정을 유지했습니다.',
+      })
+    }
+  }
+
   const updateParameter = (key: string, value: ParameterValue) => {
+    if (key === 'model' && typeof value === 'string') {
+      changeModel(value)
+      return
+    }
     setPreferences((current) => ({ ...current, parameters: { ...current.parameters, [key]: value } }))
   }
 
@@ -373,8 +433,12 @@ export default function App() {
     try {
       const live = await monitor.test()
       if (!live.ok || !live.capabilities.canGenerate) {
-        setAlert({ kind: 'error', message: live.ok ? '연결은 됐지만 이미지 생성에는 Draw Things HTTP 모드가 필요합니다.' : live.message })
+        setAlert({ kind: 'error', message: live.ok ? '연결은 됐지만 현재 API 설정으로는 이미지를 생성할 수 없습니다.' : live.message })
         setConnectionOpen(true)
+        return
+      }
+      if (mode === 'img2img' && !live.capabilities.canImageToImage) {
+        setAlert({ kind: 'error', message: '선택 이미지로 이어 그리기(img2img)는 현재 HTTP API에서만 지원됩니다. gRPC에서는 txt2img를 사용하세요.' })
         return
       }
       const requestId = randomUuid()
@@ -386,8 +450,9 @@ export default function App() {
       }
       const width = Number(requestParameters.width)
       const height = Number(requestParameters.height)
-      if (width < 128 || height < 128 || width > 8192 || height > 8192) {
-        setAlert({ kind: 'error', message: '이미지 너비와 높이는 128–8192 범위여야 합니다.' })
+      const maximumDimension = preferences.connection.protocol === 'grpc' ? 4_096 : 8_192
+      if (width < 128 || height < 128 || width > maximumDimension || height > maximumDimension) {
+        setAlert({ kind: 'error', message: `이미지 너비와 높이는 현재 ${preferences.connection.protocol.toUpperCase()} 연결에서 128–${maximumDimension} 범위여야 합니다.` })
         return
       }
       if (mode === 'txt2img' && (width % 64 !== 0 || height % 64 !== 0)) {
@@ -540,15 +605,15 @@ export default function App() {
             onSubmit={startGeneration}
             onCancel={cancel}
             onOpenConnection={() => setConnectionOpen(true)}
-            onModelChange={(model) => updateParameter('model', model)}
+            onModelChange={changeModel}
             onRefreshModels={refreshModels}
             onOpenSettings={() => setSettingsOpen(true)}
           />
         </main>
-        <InspectorPanel selected={selected} parameters={preferences.parameters} models={models} modelsLoading={modelsLoading} modelsMessage={modelsMessage} onRefreshModels={refreshModels} onChange={updateParameter} onOpenAll={() => setSettingsOpen(true)} onUseSelected={() => updateActive((session) => ({ ...session, useSelectedImage: !session.useSelectedImage }))} useSelected={useSelected} />
+        <InspectorPanel protocol={preferences.connection.protocol} selected={selected} parameters={preferences.parameters} models={models} modelsLoading={modelsLoading} modelsMessage={modelsMessage} onRefreshModels={refreshModels} onChange={updateParameter} onOpenAll={() => setSettingsOpen(true)} onUseSelected={() => updateActive((session) => ({ ...session, useSelectedImage: !session.useSelectedImage }))} useSelected={useSelected} />
       </div>
 
-      <SettingsPanel open={settingsOpen} mode={mode} values={preferences.parameters} models={models} onChange={updateParameter} onClose={() => setSettingsOpen(false)} onReset={() => setPreferences((current) => ({ ...current, parameters: { ...DEFAULT_PARAMETERS } }))} />
+      <SettingsPanel open={settingsOpen} protocol={preferences.connection.protocol} mode={mode} values={preferences.parameters} models={models} onChange={updateParameter} onClose={() => setSettingsOpen(false)} onReset={() => setPreferences((current) => ({ ...current, parameters: { ...DEFAULT_PARAMETERS } }))} />
       {connectionOpen ? <ConnectionPanel open connection={preferences.connection} result={monitor.result} bridge={bridge} discovered={discovered} testing={monitor.testing} discovering={discovering} onClose={() => setConnectionOpen(false)} onSave={saveConnection} onTest={testDraftConnection} onDiscover={discover} /> : null}
 
       {alert ? (

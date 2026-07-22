@@ -61,6 +61,27 @@ function bridgeTargetAddressSpace(connection: ConnectionConfig): LocalNetworkReq
   }
 }
 
+async function localNetworkPermissionState(
+  addressSpace: LocalNetworkRequestInit['targetAddressSpace'],
+): Promise<PermissionState | undefined> {
+  if (addressSpace === 'public' || typeof navigator === 'undefined' || !navigator.permissions?.query) {
+    return undefined
+  }
+  const names = addressSpace === 'loopback'
+    ? ['loopback-network', 'local-network-access']
+    : ['local-network', 'local-network-access']
+  for (const name of names) {
+    try {
+      const status = await navigator.permissions.query({ name } as PermissionDescriptor)
+      return status.state
+    } catch {
+      // Older browsers either use the compatibility alias or do not expose LNA
+      // through the Permissions API. The fetch result remains authoritative.
+    }
+  }
+  return undefined
+}
+
 async function fetchWithTimeout(
   input: RequestInfo | URL,
   init: LocalNetworkRequestInit = {},
@@ -157,8 +178,8 @@ export async function testConnection(
         capabilities: {
           ...EMPTY_CAPABILITIES,
           protocol: 'grpc',
-          requiresHttpModeForCanvas: true,
-          limitations: ['직접 gRPC는 브라우저 CORS와 전용 텐서 응답 형식 때문에 사용할 수 없습니다.'],
+          requiresHttpModeForCanvas: false,
+          limitations: ['브라우저는 네이티브 gRPC를 직접 호출할 수 없습니다. 로컬 커넥터 연결을 사용하세요.'],
         },
         diagnosticCode: 'grpc-requires-bridge',
       }
@@ -183,6 +204,10 @@ export async function testConnection(
     const endpoint = connection.transport === 'bridge'
       ? normalizeBridgeUrl(connection.bridgeUrl)
       : drawThingsBaseUrl(connection)
+    const addressSpace = connection.transport === 'bridge'
+      ? bridgeTargetAddressSpace(connection)
+      : targetAddressSpaceForHost(connection.host)
+    const permissionState = await localNetworkPermissionState(addressSpace)
     const clientError =
       error instanceof DrawThingsClientError
         ? error
@@ -193,15 +218,24 @@ export async function testConnection(
             'cors-or-tls',
             error,
           )
+    const permissionDenied = permissionState === 'denied'
+      && (clientError.code === 'cors-or-tls' || clientError.code === 'timeout')
+    const apiMismatch = clientError.code === 'invalid-response' || clientError.code.startsWith('http-')
     return {
       ok: false,
       latencyMs: Math.round(performance.now() - startedAt),
       checkedAt: Date.now(),
-      phase: clientError.code === 'timeout' ? 'offline' : 'cors-or-tls-blocked',
-      message: clientError.message,
+      phase: permissionDenied
+        ? 'permission-denied'
+        : clientError.code === 'timeout'
+          ? 'offline'
+          : apiMismatch ? 'api-mismatch' : 'cors-or-tls-blocked',
+      message: permissionDenied
+        ? '이 사이트의 로컬 네트워크 접근이 차단되었습니다. Android Chrome의 사이트 설정에서 로컬 네트워크 권한을 허용한 뒤 다시 테스트하세요.'
+        : clientError.message,
       endpoint,
       capabilities: { ...EMPTY_CAPABILITIES, protocol: connection.protocol },
-      diagnosticCode: clientError.code,
+      diagnosticCode: permissionDenied ? 'local-network-permission-denied' : clientError.code,
     }
   }
 }
@@ -233,6 +267,7 @@ export async function discoverEndpoints(
 export async function listInstalledModels(
   connection: ConnectionConfig,
   currentModel = '',
+  selectedLoRAs: readonly string[] = [],
 ): Promise<ModelCatalogResult> {
   if (connection.transport !== 'bridge') {
     const tested = await testConnection(connection)
@@ -257,7 +292,7 @@ export async function listInstalledModels(
     {
       method: 'POST',
       headers: bridgeHeaders(connection),
-      body: JSON.stringify({ connection }),
+      body: JSON.stringify({ connection, currentModel, selectedLoRAs }),
       targetAddressSpace: bridgeTargetAddressSpace(connection),
     },
     8_000,
@@ -366,8 +401,8 @@ export function generate(
 ): AsyncGenerator<GenerationEvent> {
   if (connection.protocol === 'grpc' && connection.transport === 'direct') {
     throw new DrawThingsClientError(
-      'gRPC 이미지 생성은 로컬 커넥터에서도 HTTP API 모드 전환이 필요합니다.',
-      'grpc-generation-unsupported',
+      'gRPC 이미지 생성에는 로컬 커넥터 연결이 필요합니다.',
+      'grpc-requires-bridge',
     )
   }
   return connection.transport === 'bridge'

@@ -7,10 +7,10 @@ Draw Things macOS의 로컬 API를 브라우저에서 사용하는 로컬 우선
 ## 핵심 기능
 
 - 여러 로컬 세션을 가진 무한 캔버스: 이동, 확대/축소, 전체 맞춤, 이미지 가져오기
-- Draw Things HTTP API를 통한 `txt2img`와 `img2img`
+- Draw Things HTTP API의 `txt2img`·`img2img`, 네이티브 gRPC의 `txt2img`
 - 선택한 캔버스 이미지를 다음 생성의 입력 이미지로 사용하는 변형 흐름
 - 같은 세션의 이전 프롬프트를 이어 붙이는 클라이언트 측 대화 문맥
-- Draw Things 소스에서 확인한 HTTP 생성 파라미터 83개와 HTTP 전용 `restore_faces` 처리
+- Draw Things 소스에서 확인한 HTTP 생성 파라미터와 gRPC `GenerationConfiguration` 88개 슬롯 매핑
 - 모델, 샘플링, 배치, SDXL, refiner, 고해상도 보정, 타일링, 비디오, LoRA, Control, 업스케일, 텍스트 인코더, TeaCache, CFG 등 범주별 전체 설정 UI
 - 로컬에 실제 설치된 주 모델을 이름과 파일명으로 보여 주는 모델·refiner 드롭다운과 즉시 새로고침
 - 연결 직전 검사와 지속적인 상태 감시
@@ -24,7 +24,7 @@ Draw Things macOS의 로컬 API를 브라우저에서 사용하는 로컬 우선
 flowchart LR
     V["Vercel\n정적 웹 앱"] -->|HTML / JS / CSS만 제공| B["방문자의 브라우저"]
     B -->|"localhost:47821\nCORS + PNA"| C["로컬 커넥터\nNode.js"]
-    C -->|"127.0.0.1:7859\nHTTP 또는 gRPC Echo"| D["Draw Things macOS"]
+    C -->|"127.0.0.1:7859\nHTTP 또는 gRPC Echo/txt2img"| D["Draw Things macOS"]
     B --- S["localStorage\nsessionStorage\nIndexedDB"]
 ```
 
@@ -54,21 +54,21 @@ pnpm --version
 pnpm install --frozen-lockfile
 ```
 
-### 2. Draw Things HTTP 서버 설정
+### 2. Draw Things API 서버 설정
 
 Draw Things의 설정에서 API 서버를 다음과 같이 맞춥니다.
 
 | Draw Things 옵션 | 캔버스 생성용 권장값 | 설명 |
 | --- | --- | --- |
 | API 서버 | 켬 / Online | 꺼지면 웹 앱이 즉시 연결 끊김으로 표시합니다. |
-| 프로토콜 | `HTTP` | 웹 캔버스의 실제 이미지 생성에 필수입니다. |
+| 프로토콜 | `HTTP` 또는 `gRPC` | HTTP는 txt2img/img2img, gRPC는 txt2img·실제 진행률·미리보기·취소를 지원합니다. |
 | IP | `127.0.0.1` | 가능하면 루프백만 사용합니다. `0.0.0.0`은 LAN에도 노출될 수 있습니다. |
 | 포트 | `7859` | 다른 포트도 지원하지만 웹 설정과 동일해야 합니다. |
 | TLS | 끔 | 내장 HTTP API의 기본 구성입니다. |
-| 공유 비밀 | 해당 없음 | 공유 비밀은 gRPC Echo·모델 탐색 진단에서 사용합니다. |
+| 공유 비밀 | 선택 | gRPC에서 켰다면 웹 연결에도 반드시 동일한 값을 입력합니다. 값이 없거나 다르면 생성을 광고하지 않습니다. |
 | 브리지 모드 | 보통 끔 | Draw Things의 서버 오프로딩 기능이며 이 프로젝트의 로컬 커넥터와 다른 개념입니다. |
-| 응답 압축 | 선택 | gRPC 진단 시 gzip 응답을 커넥터가 처리합니다. HTTP 생성에는 영향이 없습니다. |
-| 모델 탐색 | 선택 | gRPC Echo 메타데이터 진단에만 사용됩니다. |
+| 응답 압축 | 선택 | gRPC의 raw Float16 또는 FPZIP tensor 응답을 모두 PNG로 변환합니다. HTTP 생성에는 영향이 없습니다. |
+| 모델 탐색 | 선택 | gRPC Echo 메타데이터로 설치 모델 드롭다운을 보강합니다. |
 
 Draw Things를 `0.0.0.0`에 바인딩해도 웹 앱과 커넥터에는 호스트 `127.0.0.1`을 입력할 수 있습니다. 다만 이 경우 Draw Things 자체가 다른 네트워크 인터페이스에도 노출될 수 있으므로 macOS 방화벽을 함께 확인하십시오.
 
@@ -104,7 +104,7 @@ pnpm bridge
 웹 앱의 **Draw Things 연결** 화면에서 다음 값을 선택합니다.
 
 1. 연결 경로: `로컬 커넥터`
-2. Draw Things 프로토콜: `HTTP`
+2. Draw Things 프로토콜: 앱 설정과 같은 `HTTP` 또는 `gRPC`
 3. 호스트: `127.0.0.1`
 4. 포트: `7859` 또는 Draw Things에서 선택한 포트
 5. 커넥터 주소: `http://127.0.0.1:47821`
@@ -146,7 +146,7 @@ Android의 Vercel 연결 화면에는 다음 값을 입력합니다.
 | 연결 경로 | `로컬 커넥터` |
 | 휴대폰용 커넥터 HTTPS 주소 | `https://your-mac.your-tailnet.ts.net:47822` |
 | 커넥터 페어링 토큰 | Mac의 `--token`과 동일한 값 |
-| Draw Things 프로토콜 | `HTTP` |
+| Draw Things 프로토콜 | 앱 설정과 같은 `HTTP` 또는 `gRPC` |
 | Draw Things 호스트 | `127.0.0.1` |
 | Draw Things 포트 | Mac의 Draw Things API 포트 |
 
@@ -190,7 +190,7 @@ node public/bridge/draw-things-bridge.mjs \
 | 모바일 연결 값 | 설정 |
 | --- | --- |
 | 연결 경로 | `로컬 커넥터` |
-| Draw Things 프로토콜 | `HTTP` |
+| Draw Things 프로토콜 | 앱 설정과 같은 `HTTP` 또는 `gRPC` |
 | Draw Things 호스트 | `127.0.0.1` — 모바일 주소로 바꾸지 않음 |
 | Draw Things 포트 | Mac의 Draw Things API 포트 |
 | 커넥터 주소 | `http://<Mac의-Tailscale-IP>:47821` |
@@ -200,7 +200,7 @@ Tailscale 주소로 처음 열면 커넥터 주소와 `--bind` 실행 명령을 
 
 ## 배포용 커넥터
 
-배포 빌드에는 단일 실행 파일 `dist/bridge/draw-things-bridge.mjs`가 포함됩니다. 소스 트리에서는 다음 명령으로 갱신합니다.
+배포 빌드에는 단일 실행 파일 `public/bridge/draw-things-bridge.mjs`가 포함됩니다. FPZIP WASM도 이 파일 안에 내장되어 별도 런타임 파일이나 추가 npm 의존성이 없습니다. 소스 트리에서는 다음 명령으로 갱신합니다.
 
 ```sh
 pnpm bridge:build
@@ -286,16 +286,16 @@ pnpm dlx vercel --prod
 | 로컬 커넥터 | 권장 경로. Vercel HTTPS 페이지와 Draw Things 루프백 API 사이를 중계합니다. |
 | 직접 연결 | CORS를 추가한 사용자 프록시나 수정된 HTTP 서버에서만 실용적으로 동작합니다. Vercel HTTPS 배포에서는 혼합 콘텐츠 정책상 사용자 프록시도 HTTPS여야 합니다. 기본 Draw Things에서는 실패합니다. |
 | HTTP | 연결 검사, `/sdapi/v1/options`, `txt2img`, `img2img`를 지원합니다. |
-| gRPC | 커넥터를 통한 TLS/h2c Echo, 공유 비밀, gzip 응답, 모델·LoRA·ControlNet·텍스트 임베딩·업스케일러 메타데이터 진단을 지원합니다. 이미지 생성은 지원하지 않습니다. |
+| gRPC | 커넥터를 통한 TLS/h2c Echo, 공유 비밀, gzip gRPC framing, 모델 메타데이터, `txt2img`, 실제 signpost 진행률·미리보기·취소, raw/FPZIP tensor→PNG 변환을 지원합니다. `img2img`와 이미지 힌트 기반 ControlNet/IP-Adapter는 아직 지원하지 않습니다. |
 | 호스트 | 커넥터 경로는 `localhost`, `127.0.0.1`, `::1`만 허용합니다. 직접 연결은 사용자 지정 프록시 주소를 입력할 수 있습니다. |
 | 포트 | `1`–`65535`. Draw Things 기본값은 `7859`, 커넥터 기본값은 `47821`입니다. |
 | TLS | gRPC 또는 사용자 HTTPS 프록시 진단에 사용합니다. Draw Things 자체 서명 인증서는 커넥터 안에서만 처리됩니다. |
 | 공유 비밀 | Draw Things gRPC에서 공유 비밀을 켠 경우 동일 값을 입력합니다. HTTP 생성 인증 수단은 아닙니다. |
 | API Base Path | 기본 Draw Things에서는 비워 둡니다. 경로 prefix가 있는 사용자 프록시에서만 사용합니다. |
-| 클라이언트 이름 | gRPC Echo의 클라이언트 식별 값입니다. |
+| 클라이언트 이름 | gRPC Echo와 GenerateImage의 클라이언트 식별 값입니다. |
 | 앱 서버 기대값 | Draw Things의 브리지 모드, 응답 압축, 모델 탐색 설정을 기록하는 UI 값입니다. 웹 앱이 Draw Things 설정을 원격으로 켜거나 끄지는 않습니다. |
 
-브라우저 보안 정책 때문에 로컬 네트워크 권한 안내가 나타날 수 있습니다. 권한을 거부하면 `CORS/TLS/로컬 네트워크 차단` 상태로 표시됩니다. 브라우저 설정에서 이 사이트의 로컬 네트워크 권한을 허용한 뒤 다시 테스트하십시오.
+브라우저 보안 정책 때문에 로컬 네트워크 권한 안내가 나타날 수 있습니다. 권한을 거부하면 `로컬 네트워크 권한 거부됨`으로 즉시 구분해 표시합니다. HTTP 오류 응답을 받은 경우에는 권한 문제로 오인하지 않고 인증/API 불일치 상태를 유지합니다. 브라우저 설정에서 이 사이트의 로컬 네트워크 권한을 허용한 뒤 다시 테스트하십시오.
 
 ## 연결 상태 감시
 
@@ -313,6 +313,8 @@ pnpm dlx vercel --prod
 
 HTTP 모드에서 프롬프트와 네거티브 프롬프트는 Draw Things의 `txt2img` 또는 `img2img` 요청으로 전달됩니다. 캔버스에서 이미지를 선택하고 **선택 이미지로 변형**을 켜면 선택 이미지의 원본 크기와 base64 데이터를 `init_images`로 전송합니다.
 
+gRPC 모드의 `txt2img`는 공식 `imageService.proto`와 `config.fbs`를 기준으로 요청을 만들고, 서버 스트림의 signpost와 preview를 NDJSON 이벤트로 전달합니다. 최종 NNC tensor는 커넥터 안에서 공식 범위 `(value + 1) × 127.5`로 RGB에 복원한 뒤 PNG로 바뀝니다. 4채널 결과는 Draw Things의 ARGB 순서에 맞춰 RGB를 복원하고 `[0, 1]` alpha도 투명도로 보존합니다. 응답 압축을 껐을 때의 raw Float16과 켰을 때의 FPZIP을 모두 처리합니다. 브라우저 이미지를 NNC Float16 tensor로 올리는 gRPC `img2img`와 hint/content tensor가 필요한 ControlNet/IP-Adapter는 실제 앱 검증 전까지 비활성화되어 있으며 이 경우 HTTP 모드를 사용해야 합니다.
+
 대화 문맥은 Draw Things 서버 세션이 아니라 이 웹 앱의 로컬 기능입니다.
 
 - **대화 문맥 이어짐**이 켜져 있으면 같은 캔버스 세션의 직전 유효 프롬프트 뒤에 새 입력을 붙입니다.
@@ -322,9 +324,16 @@ HTTP 모드에서 프롬프트와 네거티브 프롬프트는 Draw Things의 `t
 
 ## 설치 모델 목록과 모델 설치
 
-Draw Things의 HTTP `/sdapi/v1/options`는 현재 선택된 모델 하나만 반환합니다. 전체 드롭다운이 필요할 때 로컬 커넥터는 Draw Things의 `custom.json`, 공식·비공식 모델 카탈로그를 읽고, 주 모델 파일이 실제로 존재하며 비어 있지 않은 항목만 병합합니다. VAE·CLIP·T5 같은 의존 파일은 생성 모델 목록에서 제외하며 절대 로컬 경로는 브라우저에 보내지 않습니다. gRPC와 모델 탐색이 켜진 환경에서는 Echo의 모델 메타데이터도 함께 병합합니다.
+Draw Things의 HTTP `/sdapi/v1/options`는 현재 선택된 모델 하나만 반환합니다. 전체 드롭다운이 필요할 때 로컬 커넥터는 Draw Things의 `custom.json`, 공식·비공식 모델 카탈로그를 읽고, 주 모델 파일이 실제로 존재하며 비어 있지 않은 항목만 병합합니다. VAE·CLIP·T5 같은 의존 파일은 생성 모델 목록에서 제외하며 절대 로컬 경로는 브라우저에 보내지 않습니다. gRPC와 모델 탐색이 켜진 환경에서는 Echo의 모델 메타데이터도 함께 병합합니다. 앱의 로컬 `configs.json` 캐시가 있으면 현재 모델과 선택 LoRA에 맞는 네이티브 권장 설정도 함께 제공하며, 모델 유형이 바뀔 때만 사용자가 적용 여부를 선택합니다.
 
-현재 공개 HTTP API에는 모델 검색·다운로드·변환·설치·삭제 경로가 없습니다. gRPC `UploadFile`은 이미 호환되는 파일을 해시 검증하며 동기화하는 저수준 RPC로, safetensors 변환이나 모델 메타데이터·의존 파일 설치를 처리하는 일반 모델 설치 API가 아닙니다. 새 모델은 Draw Things의 **모델 관리/가져오기**에서 설치한 뒤 웹 앱의 모델 새로고침을 누르십시오.
+현재 공개 HTTP API에는 모델 검색·다운로드·변환·설치·삭제 경로가 없습니다. gRPC에는 다음 저수준 파일 동기화 RPC가 있지만 이 커넥터는 둘 다 웹에 노출하지 않습니다.
+
+- `FilesExist`: 파일명 목록과 선택적 해시를 보내 Draw Things 저장소의 존재 여부·해시를 확인합니다.
+- `UploadFile`: 양방향 스트림의 첫 메시지로 `filename`·SHA-256·`totalSize`를 보내고, 이후 `filename`·`offset`·`content` 청크를 순서대로 전송합니다. 서버는 `.part` 파일을 만든 뒤 크기와 SHA-256을 확인하고 최종 파일을 교체합니다.
+
+`UploadFile`은 이미 Draw Things와 호환되는 파일을 복사하는 기능일 뿐, 모델 검색, safetensors 변환, 모델 사양 등록, 라이선스 확인, VAE·CLIP·T5 의존 파일 해결까지 수행하는 “모델 설치 API”가 아닙니다. `GenerateImage`의 `MetadataOverride`도 해당 요청 중 Zoo 메타데이터 해석을 덮는 값이며 영구 설치 명령이 아닙니다.
+
+이를 브라우저에 그대로 열면 임의 파일명·대용량 업로드에 따른 경로 조작, 기존 파일 덮어쓰기, 디스크 고갈, 악성/호환되지 않는 모델 투입 위험이 있습니다. 향후 지원하려면 basename/확장자 allowlist, 경로 정규화와 symlink 방어, 파일·전체 저장소 quota와 여유 공간 검사, 고정 최대 크기, 청크 offset·최종 SHA-256 재검증, 원자적 이동, 동시성·속도 제한, 공유 비밀과 커넥터 토큰, 명시적 로컬 사용자 확인이 먼저 필요합니다. 현재는 Draw Things의 **모델 관리/가져오기**에서 설치한 뒤 웹 앱의 모델 새로고침을 누르십시오.
 
 ## 로컬 데이터와 개인정보 보호
 
@@ -384,9 +393,11 @@ HTTP `img2img`는 `init_images` 한 장만 받으며 입력 이미지 크기가 
 
 ### gRPC
 
-브라우저는 Draw Things의 네이티브 HTTP/2 gRPC와 직접 통신할 수 없습니다. 로컬 커넥터는 `ImageGenerationService/Echo`를 사용한 연결·TLS·공유 비밀·모델 탐색 진단까지 지원합니다.
+브라우저는 Draw Things의 네이티브 HTTP/2 gRPC와 직접 통신할 수 없습니다. 로컬 커넥터가 TLS 또는 h2c 세션, 인증서 pinning, 공유 비밀, Protobuf framing을 처리합니다. `Echo`를 통한 연결·모델 탐색과 서버 스트리밍 `GenerateImage`의 `txt2img`를 지원합니다.
 
-gRPC 이미지 생성 요청은 FlatBuffer 설정을 사용하고 결과는 Draw Things/NNC 전용 tensor payload로 반환됩니다. 현재 JavaScript 커넥터에는 이 tensor codec이 없으므로 gRPC 이미지 생성을 광고하지 않습니다. 캔버스에서 이미지를 만들려면 Draw Things API 서버를 `HTTP`로 전환해야 합니다.
+생성 설정은 Draw Things `v1.20260716.0`의 88-slot `GenerationConfiguration` FlatBuffer로 인코딩됩니다. 결과는 raw Float16 또는 FPZIP NNC tensor로 수신해 브라우저 PNG로 바꾸며, 4 MiB 서버 청크도 이미지별로 제한을 두고 결합합니다. 실제 sampling signpost, RGB 중간 preview, 전송 크기를 스트리밍하고 HTTP/2 stream 취소를 서버에 전달합니다. 모델별 디코더가 필요한 4채널 이상의 latent preview는 RGB로 오인해 네온/반전 색상처럼 표시하거나 생성을 중단하지 않도록 생략합니다. 공유 비밀이 필요한 서버에서 Echo가 `sharedSecretMissing=true`를 반환하면 올바른 비밀을 다시 입력할 때까지 생성과 모델 탐색을 비활성화합니다.
+
+현재 gRPC `img2img`와 입력 기반 ControlNet/IP-Adapter는 지원하지 않습니다. 공식 입력 형식은 68-byte NNC header 뒤 NHWC Float16 tensor이며 image, hint, content 필드와 alpha/mask 처리가 함께 필요합니다. 이 변환을 실제 Draw Things에서 검증하기 전까지 지원한다고 광고하지 않으며, 이미지 변형과 제어 이미지는 HTTP 모드를 사용합니다. gRPC 출력 안전 한도는 축당 4096px이며 UI와 생성 전 검증에도 같은 한도를 표시합니다.
 
 ## `v1.20260716.0`에서 확인한 upstream API 문제
 
@@ -394,14 +405,14 @@ gRPC 이미지 생성 요청은 FlatBuffer 설정을 사용하고 결과는 Draw
 
 | 필드/기능 | upstream 동작 | 이 프로젝트의 처리 |
 | --- | --- | --- |
-| `stage_2_steps` | 파라미터 객체는 존재하지만 `allParameters()` 목록에서 빠져 있어 HTTP JSON으로 보내면 422가 발생합니다. | UI와 요청에서 제외합니다. |
-| `compression_artifacts` | canonical key와 alias가 중복되어 HTTP decode가 422를 반환합니다. | 읽기 전용으로 표시하고 요청에서 제거합니다. |
-| `compression_artifacts_quality` | 같은 중복 alias 문제로 422가 발생합니다. | 읽기 전용으로 표시하고 요청에서 제거합니다. |
-| `color_calibration` | 같은 중복 alias 문제로 422가 발생합니다. | 읽기 전용으로 표시하고 요청에서 제거합니다. |
-| `expand_prompt_to_json` | 같은 중복 alias 문제로 422가 발생합니다. | 읽기 전용으로 표시하고 요청에서 제거합니다. |
+| `stage_2_steps` | 파라미터 객체는 존재하지만 `allParameters()` 목록에서 빠져 있어 HTTP JSON으로 보내면 422가 발생합니다. | HTTP 요청에서는 제외하고 gRPC FlatBuffer slot 50에서는 기본값 10을 포함해 지원합니다. |
+| `compression_artifacts` | canonical key와 alias가 중복되어 HTTP decode가 422를 반환합니다. | HTTP에서는 읽기 전용/요청 제외, gRPC slot 84에서는 지원합니다. |
+| `compression_artifacts_quality` | 같은 중복 alias 문제로 422가 발생합니다. | HTTP에서는 읽기 전용/요청 제외, gRPC slot 85에서는 지원합니다. |
+| `color_calibration` | 같은 중복 alias 문제로 422가 발생합니다. | HTTP에서는 읽기 전용/요청 제외, gRPC slot 86에서는 지원합니다. |
+| `expand_prompt_to_json` | 같은 중복 alias 문제로 422가 발생합니다. | HTTP에서는 읽기 전용/요청 제외, gRPC slot 87에서는 지원합니다. |
 | `tea_cache_end` | options 기본값은 `-1`인데 HTTP validator는 `0...1000`만 허용합니다. | 값이 음수이면 요청에서 생략합니다. |
 | `separate_t5`, `t5_text` | 소스의 기본값 참조가 다른 필드를 가리키는 문제가 있습니다. | 연결 후 `/options`에서 받은 서버 값을 우선합니다. |
-| `restore_faces` | 일반 `allParameters()` 항목이 아닌 HTTP 요청 전용 bool입니다. | 별도 옵션으로 제공하며 켜면 설치된 첫 얼굴 복원 모델을 사용합니다. |
+| `restore_faces` / `face_restoration` | HTTP는 요청 전용 bool `restore_faces`, gRPC config slot 22는 얼굴 복원 모델 파일명 `face_restoration`을 사용합니다. | 프로토콜에 따라 bool 또는 모델 파일명 입력을 각각 노출하고 다른 프로토콜의 필드는 요청에서 제외합니다. |
 | mask inpaint | HTTP 서버가 mask 이미지를 decode하지 않습니다. | 지원하지 않는 것으로 명시합니다. |
 
 Draw Things 버전을 올린 뒤 이 문제가 수정되었다면 `src/lib/draw-things/parameters.ts`의 호환 처리와 테스트를 함께 갱신해야 합니다.
@@ -437,7 +448,7 @@ pnpm exec playwright install chromium
 pnpm test:e2e
 ```
 
-커넥터 테스트에는 origin·토큰·Private Network Access, body 제한, 루프백 host 제한, HTTP/gRPC probe와 protocol frame 처리가 포함됩니다. 실제 이미지 생성 품질과 모델 호환성은 사용자의 Draw Things 버전과 설치 모델에 따라 달라지므로 실제 앱에서도 최종 확인해야 합니다.
+커넥터 테스트에는 origin·토큰·Private Network Access, body 제한, 루프백 host 제한, HTTP/gRPC probe, 88-slot FlatBuffer, Protobuf streaming frame, raw Float16/FPZIP 색상 복원, ARGB alpha PNG encoding, 청크 결합, 취소 경합, 단일 파일 번들 검증이 포함됩니다. 실제 이미지 생성 품질과 모델 호환성은 사용자의 Draw Things 버전과 설치 모델에 따라 달라지므로 실제 앱에서도 최종 확인해야 합니다. 내장 FPZIP의 출처·SHA-256·BSD-3 고지는 [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md)에 있습니다.
 
 ## 공식 기준 소스
 
@@ -449,5 +460,8 @@ pnpm test:e2e
 - [HTTP request/response decode — `ServerModels.swift`](https://github.com/drawthingsai/draw-things-community/blob/64646d1202441d6abe17498caa02316669c3fc31/Libraries/HTTPAPIServer/Sources/ServerModels.swift)
 - [파라미터 정의와 `allParameters()` — `Parameters.swift`](https://github.com/drawthingsai/draw-things-community/blob/64646d1202441d6abe17498caa02316669c3fc31/Libraries/Invocation/Sources/Parameters.swift)
 - [gRPC service 구현 — `ImageGenerationServiceImpl.swift`](https://github.com/drawthingsai/draw-things-community/blob/64646d1202441d6abe17498caa02316669c3fc31/Libraries/GRPC/Server/Sources/ImageGenerationServiceImpl.swift)
-- [gRPC image service protobuf 소스](https://github.com/drawthingsai/draw-things-community/tree/64646d1202441d6abe17498caa02316669c3fc31/Libraries/GRPC/Models/Sources/imageService)
+- [gRPC image service protobuf — `imageService.proto`](https://github.com/drawthingsai/draw-things-community/blob/64646d1202441d6abe17498caa02316669c3fc31/Libraries/GRPC/Models/Sources/imageService/imageService.proto)
+- [88-slot FlatBuffer 설정 — `config.fbs`](https://github.com/drawthingsai/draw-things-community/blob/64646d1202441d6abe17498caa02316669c3fc31/Libraries/DataModels/Sources/config.fbs)
+- [공식 원격 gRPC 클라이언트 — `RemoteImageGenerator.swift`](https://github.com/drawthingsai/draw-things-community/blob/64646d1202441d6abe17498caa02316669c3fc31/Libraries/RemoteImageGenerator/Sources/RemoteImageGenerator.swift)
+- [공식 tensor→RGB 범위 변환 — `ImageConverter.swift`](https://github.com/drawthingsai/draw-things-community/blob/64646d1202441d6abe17498caa02316669c3fc31/Libraries/LocalImageGenerator/Sources/ImageConverter.swift)
 - [Draw Things 공식 문서](https://docs.drawthings.ai/)

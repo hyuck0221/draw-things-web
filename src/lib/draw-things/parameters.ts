@@ -1,4 +1,4 @@
-import type { GenerationMode, GenerationParameters, ParameterValue } from '../../domain/types'
+import type { ApiProtocol, GenerationMode, GenerationParameters, ParameterValue } from '../../domain/types'
 
 export type ParameterKind = 'string' | 'int' | 'float' | 'bool' | 'enum' | 'loras' | 'controls'
 
@@ -14,6 +14,8 @@ export interface ParameterDefinition {
   enumValues?: readonly string[]
   step?: number
   readOnlyReason?: string
+  readOnlyProtocol?: ApiProtocol
+  protocols?: readonly ApiProtocol[]
   sourceNote?: string
 }
 
@@ -125,10 +127,11 @@ const RAW_PARAMETERS: readonly RawParameter[] = [
   ['guiding_frame_noise', [], 'float', 0, 1, '가이드 프레임 노이즈', 'video', 'cap=video'],
   ['start_frame_guidance', [], 'float', 0, 25, '시작 프레임 가이던스', 'video', 'cap=video'],
   ['shift', [], 'float', 0.1, 8, '시프트', 'sampling', 'advanced'],
+  ['stage_2_steps', [], 'int', 1, 1000, '2단계 스텝', 'stage2', 'cap=stage2', ['grpcOnly']],
   ['stage_2_guidance', [], 'float', 0, 25, '2단계 CFG', 'stage2', 'cap=stage2'],
   ['stage_2_shift', [], 'float', 0.1, 5, '2단계 시프트', 'stage2', 'cap=stage2'],
   ['loras', [], 'loras', null, null, 'LoRA', 'conditioning', 'always'],
-  ['controls', [], 'controls', null, null, 'ControlNet', 'conditioning', 'always'],
+  ['controls', [], 'controls', null, null, 'ControlNet', 'conditioning', 'always', ['httpOnly']],
   ['stochastic_sampling_gamma', [], 'float', 0, 1, '확률적 샘플링 감마', 'sampling', 'advanced'],
   ['preserve_original_after_inpaint', [], 'bool', null, null, '인페인트 후 원본 보존', 'inpaint', 'route=inpaint'],
   ['tiled_diffusion', [], 'bool', null, null, '타일 확산', 'tileDiffusion', 'advanced'],
@@ -160,7 +163,8 @@ const RAW_PARAMETERS: readonly RawParameter[] = [
   ['compression_artifacts_quality', ['compression_artifacts_quality'], 'float', 0, 100, '압축 품질', 'postprocess', 'compression_artifacts!=disabled', ['httpBroken']],
   ['color_calibration', ['color_calibration'], 'enum:color', null, null, '색상 보정', 'postprocess', 'advanced', ['httpBroken']],
   ['expand_prompt_to_json', ['expand_prompt_to_json'], 'bool', null, null, '프롬프트를 JSON으로 확장', 'prompt', 'advanced', ['httpBroken']],
-  ['restore_faces', [], 'bool', null, null, '얼굴 복원', 'postprocess', 'always', ['specialHttp']],
+  ['restore_faces', [], 'bool', null, null, '얼굴 복원', 'postprocess', 'always', ['specialHttp', 'httpOnly']],
+  ['face_restoration', [], 'string', null, null, '얼굴 복원 모델', 'postprocess', 'advanced', ['grpcOnly']],
 ] as const
 
 function kindAndEnum(rawKind: string): Pick<ParameterDefinition, 'kind' | 'enumValues'> {
@@ -183,12 +187,18 @@ export const PARAMETER_DEFINITIONS: ParameterDefinition[] = RAW_PARAMETERS.map(
     readOnlyReason: flags.includes('httpBroken')
       ? 'Draw Things 1.20260716.0의 중복 JSON 별칭 버그로 HTTP 요청 시 422가 발생해 현재 읽기 전용입니다.'
       : undefined,
+    readOnlyProtocol: flags.includes('httpBroken') ? 'http' : undefined,
+    protocols: flags.includes('grpcOnly')
+      ? ['grpc']
+      : flags.includes('httpOnly') ? ['http'] : undefined,
     sourceNote: flags.includes('upstreamDefaultBug')
       ? '현재 앱 소스에서 기본값 참조가 잘못되어 연결 후 서버 값을 우선 사용합니다.'
       : flags.includes('minusOneOmit')
         ? '앱 기본값 -1은 HTTP 검증 범위 밖이므로 -1일 때 요청에서 생략합니다.'
         : flags.includes('specialHttp')
           ? 'HTTP API 전용 필드이며 활성화하면 앱에 설치된 첫 얼굴 복원 모델을 사용합니다.'
+          : flags.includes('grpcOnly')
+            ? 'Draw Things gRPC GenerationConfiguration 전용 필드입니다.'
           : undefined,
   }),
 )
@@ -197,7 +207,9 @@ export function isParameterVisible(
   definition: ParameterDefinition,
   values: GenerationParameters,
   mode: GenerationMode,
+  protocol: ApiProtocol = 'http',
 ) {
+  if (definition.protocols && !definition.protocols.includes(protocol)) return false
   const { when } = definition
   if (when === 'composer') return false
   if (when === 'route=img2img' || when === 'route=inpaint') return mode === 'img2img'
@@ -225,7 +237,33 @@ const HTTP_UNWRITABLE = new Set([
   'compression_artifacts_quality',
   'color_calibration',
   'expand_prompt_to_json',
+  'stage_2_steps',
+  'face_restoration',
 ])
+
+export function parameterReadOnlyReason(definition: ParameterDefinition, protocol: ApiProtocol) {
+  return !definition.readOnlyProtocol || definition.readOnlyProtocol === protocol
+    ? definition.readOnlyReason
+    : undefined
+}
+
+const GRPC_DIMENSION_LIMIT_KEYS = new Set([
+  'width',
+  'height',
+  'original_width',
+  'original_height',
+  'target_width',
+  'target_height',
+  'negative_original_width',
+  'negative_original_height',
+])
+
+export function parameterMaximum(definition: ParameterDefinition, protocol: ApiProtocol) {
+  if (protocol === 'grpc' && GRPC_DIMENSION_LIMIT_KEYS.has(definition.key)) {
+    return Math.min(definition.max ?? 4_096, 4_096)
+  }
+  return definition.max
+}
 
 export function sanitizeHttpParameters(parameters: GenerationParameters) {
   const safe: Record<string, ParameterValue> = {}

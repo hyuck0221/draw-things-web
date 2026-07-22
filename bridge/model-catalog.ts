@@ -1,6 +1,7 @@
 import { readdir, readFile, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
+import { resolveRecommendedSettings, type RecommendedSettings } from '../src/lib/draw-things/recommended-settings.ts'
 import { isPlainObject } from './security.ts'
 
 const MAX_METADATA_BYTES = 8 * 1024 * 1024
@@ -11,6 +12,8 @@ export interface LocalModelRecord extends Record<string, unknown> {
   name?: string
   version?: string
   modifier?: string
+  defaultScale?: number
+  recommendedSettings?: RecommendedSettings
   source: 'local-metadata'
 }
 
@@ -86,17 +89,20 @@ async function installedCheckpointFiles(directories: readonly string[]): Promise
 function modelRecord(value: Record<string, unknown>): LocalModelRecord | undefined {
   const file = typeof value.file === 'string' ? value.file.trim() : ''
   if (!file || basename(file) !== file || !file.toLowerCase().endsWith('.ckpt')) return undefined
+  const defaultScale = Number(value.default_scale)
   return {
     file,
     ...(typeof value.name === 'string' && value.name.trim() ? { name: value.name.trim() } : {}),
     ...(typeof value.version === 'string' && value.version.trim() ? { version: value.version.trim() } : {}),
     ...(typeof value.modifier === 'string' && value.modifier.trim() ? { modifier: value.modifier.trim() } : {}),
+    ...(Number.isInteger(defaultScale) && defaultScale >= 2 && defaultScale <= 128 ? { defaultScale } : {}),
     source: 'local-metadata',
   }
 }
 
 export async function listLocalDrawThingsModels(
   configuredDirectories?: readonly string[],
+  selectedLoRAs: readonly string[] = [],
 ): Promise<LocalModelCatalog> {
   const requested = configuredDirectories?.length
     ? configuredDirectories
@@ -111,6 +117,7 @@ export async function listLocalDrawThingsModels(
   }
 
   const specifications = new Map<string, LocalModelRecord>()
+  const recommendedConfigurations: Record<string, unknown>[] = []
   for (const directory of directories) {
     const dataDirectory = dirname(dirname(directory))
     const catalogPaths = [
@@ -123,6 +130,9 @@ export async function listLocalDrawThingsModels(
         if (model && !specifications.has(model.file)) specifications.set(model.file, model)
       }
     }
+    recommendedConfigurations.push(...await readMetadataArray(
+      join(dataDirectory, 'Library', 'Caches', 'net', 'configs.json'),
+    ))
   }
   // Custom metadata takes precedence over the downloaded catalog display name.
   for (const directory of directories) {
@@ -135,9 +145,17 @@ export async function listLocalDrawThingsModels(
   const installed = await installedCheckpointFiles(directories)
   const models = [...specifications.values()]
     .filter((model) => installed.has(model.file))
+    .map((model) => {
+      const recommendedSettings = resolveRecommendedSettings(model, recommendedConfigurations, selectedLoRAs)
+      return recommendedSettings ? { ...model, recommendedSettings } : model
+    })
     .sort((left, right) => (left.name ?? left.file).localeCompare(right.name ?? right.file, 'ko'))
-  const warnings = models.length === 0
-    ? ['설치된 주 모델 메타데이터를 찾지 못했습니다. 보조 VAE·CLIP·T5 파일은 목록에서 제외됩니다.']
-    : []
+  const warnings: string[] = []
+  if (models.length === 0) {
+    warnings.push('설치된 주 모델 메타데이터를 찾지 못했습니다. 보조 VAE·CLIP·T5 파일은 목록에서 제외됩니다.')
+  }
+  if (recommendedConfigurations.length === 0) {
+    warnings.push('로컬 configs.json 추천 설정 캐시가 없어 모델은 표시하지만 권장 설정은 자동 적용하지 않습니다.')
+  }
   return { models, directoriesScanned: directories.length, warnings }
 }

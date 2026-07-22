@@ -49,6 +49,7 @@ export interface EchoReplyDecoded {
   message: string
   files: string[]
   metadata: EchoMetadata
+  modelBrowsingAvailable: boolean
   sharedSecretMissing: boolean
   thresholds?: {
     community: number
@@ -67,7 +68,7 @@ export interface ProbeSuccess {
     options: boolean
     modelBrowsing: boolean
     generation: boolean
-    generationTransport: 'http' | null
+    generationTransport: 'http' | 'grpc' | null
     txt2img: boolean
     img2img: boolean
     reason?: string

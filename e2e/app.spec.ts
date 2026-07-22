@@ -34,7 +34,7 @@ test('opens the canvas and the complete parameter drawer', async ({ page }, test
   await expect(page.getByRole('button', { name: /연결 상태: 연결 안 됨/ })).toBeVisible()
   await expect(page.getByLabel('이미지 프롬프트')).toBeVisible()
 
-  await page.getByRole('button', { name: /전체 84개 설정/ }).click()
+  await page.getByRole('button', { name: '전체 API 설정' }).click()
   await expect(page.getByRole('complementary', { name: '전체 생성 설정' })).toBeVisible()
   await expect(page.getByPlaceholder('설정 이름 또는 API 키 검색')).toBeVisible()
   await page.getByPlaceholder('설정 이름 또는 API 키 검색').fill('tea cache')
@@ -156,7 +156,7 @@ test('connects, generates, and restores a local canvas through the bridge contra
   await expect(modelSelect.locator('option')).toHaveCount(2)
   await modelSelect.selectOption('second.ckpt')
 
-  await page.getByRole('button', { name: /전체 84개 설정/ }).click()
+  await page.getByRole('button', { name: '전체 API 설정' }).click()
   await page.getByPlaceholder('설정 이름 또는 API 키 검색').fill('리파이너 모델')
   const refinerSelect = page.getByLabel('리파이너 모델')
   await expect(refinerSelect.locator('option')).toHaveCount(3)

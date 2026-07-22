@@ -232,6 +232,8 @@ describe('loopback bridge HTTP surface', () => {
             tea_cache_end: -1,
             upscaler: '',
             upscaler_scale: 0,
+            stage_2_steps: 10,
+            face_restoration: 'face_model.ckpt',
           },
         },
       }),
@@ -250,7 +252,34 @@ describe('loopback bridge HTTP surface', () => {
     })
     expect(upstreamGenerationBody).not.toHaveProperty('tea_cache_end')
     expect(upstreamGenerationBody).not.toHaveProperty('upscaler')
+    expect(upstreamGenerationBody).not.toHaveProperty('stage_2_steps')
+    expect(upstreamGenerationBody).not.toHaveProperty('face_restoration')
     expect(upstreamGenerationBody).toHaveProperty('upscaler_scale', 0)
+
+    const lowLevelGeneration = await fetch(`http://127.0.0.1:${bridgePort}/v1/generate`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        connection,
+        id: 'test-low-level-job',
+        mode: 'txt2img',
+        parameters: {
+          prompt: 'dog',
+          negative_prompt: '',
+          width: 512,
+          height: 512,
+          upscaler: '   ',
+          stage_2_steps: 10,
+          face_restoration: 'face_model.ckpt',
+        },
+      }),
+    })
+    expect(lowLevelGeneration.status).toBe(200)
+    await lowLevelGeneration.text()
+    expect(upstreamGenerationBody).toMatchObject({ prompt: 'dog', width: 512, height: 512 })
+    expect(upstreamGenerationBody).not.toHaveProperty('upscaler')
+    expect(upstreamGenerationBody).not.toHaveProperty('stage_2_steps')
+    expect(upstreamGenerationBody).not.toHaveProperty('face_restoration')
   })
 
   it('cancels an active upstream request by generation id', async () => {
@@ -315,10 +344,15 @@ describe('loopback bridge HTTP surface', () => {
   it('returns installed model metadata without exposing dependency checkpoints', async () => {
     const root = await mkdtemp(join(tmpdir(), 'draw-things-bridge-models-'))
     temporaryDirectories.push(root)
-    const modelsDirectory = join(root, 'Models')
+    const modelsDirectory = join(root, 'Data', 'Documents', 'Models')
+    const cacheDirectory = join(root, 'Data', 'Library', 'Caches', 'net')
     await mkdir(modelsDirectory, { recursive: true })
+    await mkdir(cacheDirectory, { recursive: true })
     await writeFile(join(modelsDirectory, 'custom.json'), JSON.stringify([
-      { file: 'local_main.ckpt', name: 'Local Main', version: 'sdxl' },
+      { file: 'local_main.ckpt', name: 'Local Main', version: 'sdxl', default_scale: 12 },
+    ]))
+    await writeFile(join(cacheDirectory, 'configs.json'), JSON.stringify([
+      { name: 'Local SDXL', version: 'sdxl', configuration: { guidanceScale: 6, sampler: 12 } },
     ]))
     await writeFile(join(modelsDirectory, 'local_main.ckpt'), 'model')
     await writeFile(join(modelsDirectory, 'clip_dependency.ckpt'), 'dependency')
@@ -344,12 +378,19 @@ describe('loopback bridge HTTP surface', () => {
         connection: { protocol: 'http', host: '127.0.0.1', port: drawThingsPort, tls: false },
       }),
     })
-    const result = await response.json() as { models: Array<{ file: string }>; source: string }
+    const result = await response.json() as {
+      models: Array<{ file: string; defaultScale?: number; recommendedSettings?: { profileName?: string } }>
+      source: string
+    }
 
     expect(response.status).toBe(200)
     expect(result.source).toBe('combined')
     expect(result.models).toEqual(expect.arrayContaining([
-      expect.objectContaining({ file: 'local_main.ckpt' }),
+      expect.objectContaining({
+        file: 'local_main.ckpt',
+        defaultScale: 12,
+        recommendedSettings: expect.objectContaining({ profileName: 'Local SDXL' }),
+      }),
       expect.objectContaining({ file: 'current_only.ckpt' }),
     ]))
     expect(result.models.map((model) => model.file)).not.toContain('clip_dependency.ckpt')

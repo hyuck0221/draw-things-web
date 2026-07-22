@@ -36,7 +36,8 @@ export function useConnectionMonitor({
           }
         } else {
           failures.current += 1
-          if (next.phase === 'api-mismatch' || next.phase === 'cors-or-tls-blocked') {
+          if (next.phase === 'api-mismatch' || next.phase === 'cors-or-tls-blocked'
+            || next.phase === 'permission-denied') {
             setPhase(next.phase)
           } else {
             setPhase(failures.current >= 3 ? 'offline' : 'degraded')

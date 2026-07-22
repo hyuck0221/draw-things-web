@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { DEFAULT_CONNECTION } from '../defaults'
-import { discoverEndpoints, drawThingsBaseUrl, generate, listInstalledModels, normalizeGeneratedImage } from './client'
+import { discoverEndpoints, drawThingsBaseUrl, generate, listInstalledModels, normalizeGeneratedImage, testConnection } from './client'
 
 afterEach(() => vi.unstubAllGlobals())
 
@@ -102,13 +102,62 @@ describe('listInstalledModels', () => {
       ...DEFAULT_CONNECTION,
       bridgeUrl: 'http://100.121.194.59:47821',
       bridgePairingToken: 'bridge-token',
-    })
+    }, 'current.ckpt', ['detail_lora.ckpt'])
 
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit]
     expect(url).toBe('http://100.121.194.59:47821/v1/models')
     expect(init.headers).toMatchObject({ 'x-draw-things-pairing-token': 'bridge-token' })
+    expect(JSON.parse(String(init.body))).toMatchObject({
+      currentModel: 'current.ckpt',
+      selectedLoRAs: ['detail_lora.ckpt'],
+    })
     expect((init as RequestInit & { targetAddressSpace?: string }).targetAddressSpace).toBe('local')
     expect(result.models).toEqual([expect.objectContaining({ file: 'local.ckpt' })])
+  })
+})
+
+describe('testConnection local-network diagnostics', () => {
+  it('reports a denied Android/Chrome local-network permission explicitly', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new TypeError('Failed to fetch')))
+    vi.stubGlobal('navigator', {
+      permissions: { query: vi.fn().mockResolvedValue({ state: 'denied' }) },
+    })
+
+    const result = await testConnection({
+      ...DEFAULT_CONNECTION,
+      bridgeUrl: 'https://mac.example-tailnet.ts.net:47822',
+      bridgePairingToken: 'bridge-token',
+    })
+
+    expect(result).toMatchObject({
+      ok: false,
+      phase: 'permission-denied',
+      diagnosticCode: 'local-network-permission-denied',
+    })
+    expect(result.message).toContain('Android Chrome')
+  })
+
+  it('preserves an authenticated connector HTTP error even when the permission is denied', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(
+      JSON.stringify({ message: 'A valid bridge pairing token is required.' }),
+      { status: 401, headers: { 'content-type': 'application/json' } },
+    )))
+    vi.stubGlobal('navigator', {
+      permissions: { query: vi.fn().mockResolvedValue({ state: 'denied' }) },
+    })
+
+    const result = await testConnection({
+      ...DEFAULT_CONNECTION,
+      bridgeUrl: 'https://mac.example-tailnet.ts.net:47822',
+      bridgePairingToken: 'wrong-token',
+    })
+
+    expect(result).toMatchObject({
+      ok: false,
+      phase: 'api-mismatch',
+      diagnosticCode: 'http-401',
+      message: 'A valid bridge pairing token is required.',
+    })
   })
 })
 
