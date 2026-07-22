@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { isTailscaleIpv4, suggestedBridgeUrl, tailscaleAddress, targetAddressSpaceForHost } from './network'
+import { isTailscaleIpv4, isTailscaleMagicDnsHost, suggestedBridgeUrl, tailscaleAddress, targetAddressSpaceForHost } from './network'
 
 describe('browser network addressing', () => {
   it('classifies Tailscale IPv4 addresses as local instead of loopback', () => {
@@ -9,6 +9,9 @@ describe('browser network addressing', () => {
     expect(targetAddressSpaceForHost('8.8.8.8')).toBe('public')
     expect(targetAddressSpaceForHost('127.example.com')).toBe('public')
     expect(targetAddressSpaceForHost('fdexample.com')).toBe('public')
+    expect(isTailscaleMagicDnsHost('hshim.example-tailnet.ts.net')).toBe(true)
+    expect(isTailscaleMagicDnsHost('ts.net')).toBe(false)
+    expect(targetAddressSpaceForHost('hshim.example-tailnet.ts.net')).toBe('local')
     expect(tailscaleAddress('[fd7a:115c:a1e0::1234]')).toBe('fd7a:115c:a1e0::1234')
   })
 

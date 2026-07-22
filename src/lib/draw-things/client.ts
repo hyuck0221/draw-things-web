@@ -180,11 +180,16 @@ export async function testConnection(
       remoteOptions: options,
     }
   } catch (error) {
+    const endpoint = connection.transport === 'bridge'
+      ? normalizeBridgeUrl(connection.bridgeUrl)
+      : drawThingsBaseUrl(connection)
     const clientError =
       error instanceof DrawThingsClientError
         ? error
         : new DrawThingsClientError(
-            '브라우저가 로컬 API 응답을 읽지 못했습니다. CORS, TLS 또는 로컬 네트워크 권한을 확인하세요.',
+            connection.transport === 'bridge'
+              ? '브라우저가 커넥터에 도달하지 못했습니다. 커넥터 주소, Tailscale 연결, HTTPS 인증서와 사이트의 로컬 네트워크 권한을 확인하세요.'
+              : '브라우저가 로컬 API 응답을 읽지 못했습니다. CORS, TLS 또는 로컬 네트워크 권한을 확인하세요.',
             'cors-or-tls',
             error,
           )
@@ -194,7 +199,7 @@ export async function testConnection(
       checkedAt: Date.now(),
       phase: clientError.code === 'timeout' ? 'offline' : 'cors-or-tls-blocked',
       message: clientError.message,
-      endpoint: drawThingsBaseUrl(connection),
+      endpoint,
       capabilities: { ...EMPTY_CAPABILITIES, protocol: connection.protocol },
       diagnosticCode: clientError.code,
     }

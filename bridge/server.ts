@@ -18,6 +18,7 @@ import {
   normalizeConnection,
   normalizeLoopbackHost,
   normalizeOrigin,
+  normalizeTailscaleServeHost,
   publicConnection,
   readJsonBody,
   sanitizeError,
@@ -50,6 +51,7 @@ export interface BridgeServerOptions {
   origins?: readonly string[]
   token?: string
   modelDirectories?: readonly string[]
+  tailscaleServeHosts?: readonly string[]
 }
 
 export interface ParsedCliOptions {
@@ -58,6 +60,7 @@ export interface ParsedCliOptions {
   origins: string[]
   token?: string
   modelDirectories: string[]
+  tailscaleServeHosts: string[]
   help: boolean
 }
 
@@ -461,6 +464,7 @@ function safeHttpParameters(parameters: Record<string, unknown>): Record<string,
   return Object.fromEntries(Object.entries(parameters).filter(([key, value]) => {
     if (HTTP_UNWRITABLE_PARAMETERS.has(key)) return false
     if (key === 'tea_cache_end' && Number(value) < 0) return false
+    if (key === 'upscaler' && typeof value === 'string' && !value.trim()) return false
     return true
   }))
 }
@@ -651,11 +655,16 @@ export function createBridgeServer(options: BridgeServerOptions = {}): Server {
     throw new BridgeError('INVALID_BRIDGE_PORT', 'Bridge port must be an integer from 0 to 65535.')
   }
   const bind = normalizeBridgeBindAddress(options.bind)
-  if (!isLoopbackBindAddress(bind) && (typeof options.token !== 'string' || options.token.length < 32)) {
-    throw new BridgeError('REMOTE_BIND_TOKEN_REQUIRED', 'A token of at least 32 characters is required for a Tailscale bind.')
+  const tailscaleServeHosts = [...new Set((options.tailscaleServeHosts ?? []).map(normalizeTailscaleServeHost))]
+  const remotelyReachable = !isLoopbackBindAddress(bind) || tailscaleServeHosts.length > 0
+  if (tailscaleServeHosts.length > 0 && !isLoopbackBindAddress(bind)) {
+    throw new BridgeError('TAILSCALE_SERVE_LOOPBACK_REQUIRED', 'Tailscale Serve proxy mode requires a loopback connector bind.')
   }
-  if (!isLoopbackBindAddress(bind) && !options.origins?.length) {
-    throw new BridgeError('REMOTE_BIND_ORIGIN_REQUIRED', 'At least one explicit --origin is required for a Tailscale bind.')
+  if (remotelyReachable && (typeof options.token !== 'string' || options.token.length < 32)) {
+    throw new BridgeError('REMOTE_BIND_TOKEN_REQUIRED', 'A token of at least 32 characters is required for a Tailscale bind or Serve proxy.')
+  }
+  if (remotelyReachable && !options.origins?.length) {
+    throw new BridgeError('REMOTE_BIND_ORIGIN_REQUIRED', 'At least one explicit --origin is required for a Tailscale bind or Serve proxy.')
   }
   const origins = options.origins?.length ? options.origins : DEFAULT_DEV_ORIGINS
   const allowedOrigins = new Set(origins.map(normalizeOrigin))
@@ -668,7 +677,7 @@ export function createBridgeServer(options: BridgeServerOptions = {}): Server {
       const expectedPort = address && typeof address !== 'string'
         ? address.port
         : requestedPort
-      validateHostHeader(request, expectedPort, bind)
+      validateHostHeader(request, expectedPort, bind, tailscaleServeHosts)
       const allowedOrigin = validateOrigin(request, response, allowedOrigins)
       const path = requestPath(request)
       const methods = expectedMethods(path)
@@ -695,6 +704,7 @@ export function createBridgeServer(options: BridgeServerOptions = {}): Server {
           allowedOrigin,
           tokenRequired: Boolean(options.token),
           allowedOrigins: [...allowedOrigins],
+          tailscaleServeHosts,
           activeGenerations: active.size,
           now: new Date().toISOString(),
         })
@@ -744,6 +754,7 @@ export function parseCliArguments(args: string[]): ParsedCliOptions {
   const origins: string[] = []
   let token: string | undefined
   const modelDirectories: string[] = []
+  const tailscaleServeHosts: string[] = []
   let help = false
   for (let index = 0; index < args.length; index += 1) {
     const argument = args[index]!
@@ -782,15 +793,22 @@ export function parseCliArguments(args: string[]): ParsedCliOptions {
       if (inlineValue === undefined) index += 1
       if (!value.trim()) throw new BridgeError('INVALID_MODELS_DIRECTORY', '--models-dir must not be empty.')
       modelDirectories.push(resolve(value))
+    } else if (flag === '--tailscale-host' || flag === '--proxy-host') {
+      const value = inlineValue ?? nextArgument(args, index, flag)
+      if (inlineValue === undefined) index += 1
+      tailscaleServeHosts.push(normalizeTailscaleServeHost(value))
     } else {
       throw new BridgeError('UNKNOWN_ARGUMENT', `Unknown argument: ${argument}`)
     }
   }
-  if (!isLoopbackBindAddress(bind) && (!token || token.length < 32)) {
-    throw new BridgeError('REMOTE_BIND_TOKEN_REQUIRED', 'A token of at least 32 characters is required with a Tailscale --bind.')
+  if (tailscaleServeHosts.length > 0 && !isLoopbackBindAddress(bind)) {
+    throw new BridgeError('TAILSCALE_SERVE_LOOPBACK_REQUIRED', '--tailscale-host requires the default loopback --bind.')
   }
-  if (!isLoopbackBindAddress(bind) && origins.length === 0) {
-    throw new BridgeError('REMOTE_BIND_ORIGIN_REQUIRED', 'An explicit --origin is required with a Tailscale --bind.')
+  if ((!isLoopbackBindAddress(bind) || tailscaleServeHosts.length > 0) && (!token || token.length < 32)) {
+    throw new BridgeError('REMOTE_BIND_TOKEN_REQUIRED', 'A token of at least 32 characters is required with Tailscale exposure.')
+  }
+  if ((!isLoopbackBindAddress(bind) || tailscaleServeHosts.length > 0) && origins.length === 0) {
+    throw new BridgeError('REMOTE_BIND_ORIGIN_REQUIRED', 'An explicit --origin is required with Tailscale exposure.')
   }
   return {
     port,
@@ -798,6 +816,7 @@ export function parseCliArguments(args: string[]): ParsedCliOptions {
     origins: origins.length ? [...new Set(origins)] : [...DEFAULT_DEV_ORIGINS],
     token,
     modelDirectories: [...new Set(modelDirectories)],
+    tailscaleServeHosts: [...new Set(tailscaleServeHosts)],
     help,
   }
 }
@@ -806,7 +825,7 @@ function usage(): string {
   return `Draw Things Web local connector ${BRIDGE_VERSION}
 
 Usage:
-  draw-things-bridge.mjs [--port 47821] [--bind 127.0.0.1] [--origin https://app.example]... [--token SECRET] [--models-dir PATH]...
+  draw-things-bridge.mjs [--port 47821] [--bind 127.0.0.1] [--origin https://app.example]... [--token SECRET] [--tailscale-host HOST[:PORT]]... [--models-dir PATH]...
 
 Options:
   --port <number>          Connector port (default: 47821)
@@ -814,11 +833,14 @@ Options:
   --origin <origin>        Exact allowed website Origin; repeat for multiple sites
   --token <secret>         Optional bearer / X-Draw-Things-Bridge-Token value
   --pairing-code <secret>  Alias for --token
+  --tailscale-host <host>  Exact *.ts.net Tailscale Serve hostname and optional HTTPS port
+  --proxy-host <host>      Alias for --tailscale-host
   --models-dir <path>      Additional Draw Things model folder; repeat as needed
   --help                   Show this help
 
 The connector only binds loopback or an explicit Tailscale address and only contacts Draw Things on loopback.
 Tailscale binds require an explicit origin and a token of at least 32 characters.
+Tailscale Serve hosts keep the connector on loopback and also require an explicit origin and 32-character token.
 Without --origin, localhost Vite development origins on ports 5173 and 4173 are allowed.`
 }
 

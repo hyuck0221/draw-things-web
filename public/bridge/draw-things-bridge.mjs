@@ -476,6 +476,30 @@ function normalizeBridgeBindAddress(value) {
     "Bridge bind must be 127.0.0.1, ::1, or this Mac's Tailscale IP. Wildcard, LAN, and public addresses are rejected."
   );
 }
+function normalizeTailscaleServeHost(value) {
+  if (typeof value !== "string" || !value.trim()) {
+    throw new BridgeError("INVALID_TAILSCALE_HOST", "Tailscale Serve host must be a non-empty hostname with an optional port.");
+  }
+  const raw = value.trim().toLowerCase();
+  if (raw.includes("://")) {
+    throw new BridgeError("INVALID_TAILSCALE_HOST", "Tailscale Serve host must not include a URL scheme.");
+  }
+  let parsed;
+  try {
+    parsed = new URL(`https://${raw}`);
+  } catch {
+    throw new BridgeError("INVALID_TAILSCALE_HOST", `Invalid Tailscale Serve host: ${value}`);
+  }
+  const hostname = parsed.hostname.replace(/^\[|\]$/g, "").replace(/\.$/, "").toLowerCase();
+  const port = parsed.port ? Number(parsed.port) : 443;
+  if (parsed.username || parsed.password || parsed.pathname !== "/" || parsed.search || parsed.hash || !hostname.endsWith(".ts.net") || hostname === "ts.net" || !Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new BridgeError(
+      "INVALID_TAILSCALE_HOST",
+      "Tailscale Serve host must be an exact *.ts.net hostname with an optional port and no path."
+    );
+  }
+  return `${hostname}:${port}`;
+}
 function normalizeLoopbackHost(value) {
   const raw = typeof value === "string" ? value.trim().toLowerCase() : "127.0.0.1";
   const unbracketed = raw.startsWith("[") && raw.endsWith("]") ? raw.slice(1, -1) : raw;
@@ -603,7 +627,7 @@ async function readJsonBody(request, limit) {
   assertSafeJson(parsed);
   return parsed;
 }
-function validateHostHeader(request, expectedPort, bindAddress = "127.0.0.1") {
+function validateHostHeader(request, expectedPort, bindAddress = "127.0.0.1", tailscaleServeHosts = []) {
   const header = request.headers.host;
   if (!header || /[\\/?#@\s]/.test(header)) {
     throw new BridgeError("INVALID_HOST", "Invalid Host header.", 403);
@@ -615,11 +639,18 @@ function validateHostHeader(request, expectedPort, bindAddress = "127.0.0.1") {
     throw new BridgeError("INVALID_HOST", "Invalid Host header.", 403);
   }
   const host = parsed.hostname.replace(/^\[|\]$/g, "").toLowerCase();
-  const port = parsed.port ? Number(parsed.port) : 80;
+  const explicitPort = parsed.port ? Number(parsed.port) : void 0;
   const allowedHosts = isLoopbackBindAddress(bindAddress) ? LOOPBACK_HOSTS : [bindAddress];
-  if (!allowedHosts.includes(host) || port !== expectedPort) {
-    throw new BridgeError("INVALID_HOST", "Host must exactly address the configured connector bind and port.", 403);
-  }
+  if (allowedHosts.includes(host) && (explicitPort ?? 80) === expectedPort) return;
+  const remoteAddress = request.socket.remoteAddress?.toLowerCase();
+  const fromLoopbackProxy = remoteAddress === "127.0.0.1" || remoteAddress === "::1" || remoteAddress === "::ffff:127.0.0.1";
+  const proxyPort = explicitPort ?? 443;
+  const matchesTailscaleServe = fromLoopbackProxy && tailscaleServeHosts.some((authority) => {
+    const separator = authority.lastIndexOf(":");
+    return authority.slice(0, separator) === host && Number(authority.slice(separator + 1)) === proxyPort;
+  });
+  if (matchesTailscaleServe) return;
+  throw new BridgeError("INVALID_HOST", "Host must exactly address the configured connector bind, port, or trusted Tailscale Serve host.", 403);
 }
 function validateOrigin(request, response, allowedOrigins) {
   const originHeader = request.headers.origin;
@@ -1311,6 +1342,7 @@ function safeHttpParameters(parameters) {
   return Object.fromEntries(Object.entries(parameters).filter(([key, value]) => {
     if (HTTP_UNWRITABLE_PARAMETERS.has(key)) return false;
     if (key === "tea_cache_end" && Number(value) < 0) return false;
+    if (key === "upscaler" && typeof value === "string" && !value.trim()) return false;
     return true;
   }));
 }
@@ -1476,11 +1508,16 @@ function createBridgeServer(options = {}) {
     throw new BridgeError("INVALID_BRIDGE_PORT", "Bridge port must be an integer from 0 to 65535.");
   }
   const bind = normalizeBridgeBindAddress(options.bind);
-  if (!isLoopbackBindAddress(bind) && (typeof options.token !== "string" || options.token.length < 32)) {
-    throw new BridgeError("REMOTE_BIND_TOKEN_REQUIRED", "A token of at least 32 characters is required for a Tailscale bind.");
+  const tailscaleServeHosts = [...new Set((options.tailscaleServeHosts ?? []).map(normalizeTailscaleServeHost))];
+  const remotelyReachable = !isLoopbackBindAddress(bind) || tailscaleServeHosts.length > 0;
+  if (tailscaleServeHosts.length > 0 && !isLoopbackBindAddress(bind)) {
+    throw new BridgeError("TAILSCALE_SERVE_LOOPBACK_REQUIRED", "Tailscale Serve proxy mode requires a loopback connector bind.");
   }
-  if (!isLoopbackBindAddress(bind) && !options.origins?.length) {
-    throw new BridgeError("REMOTE_BIND_ORIGIN_REQUIRED", "At least one explicit --origin is required for a Tailscale bind.");
+  if (remotelyReachable && (typeof options.token !== "string" || options.token.length < 32)) {
+    throw new BridgeError("REMOTE_BIND_TOKEN_REQUIRED", "A token of at least 32 characters is required for a Tailscale bind or Serve proxy.");
+  }
+  if (remotelyReachable && !options.origins?.length) {
+    throw new BridgeError("REMOTE_BIND_ORIGIN_REQUIRED", "At least one explicit --origin is required for a Tailscale bind or Serve proxy.");
   }
   const origins = options.origins?.length ? options.origins : DEFAULT_DEV_ORIGINS;
   const allowedOrigins = new Set(origins.map(normalizeOrigin));
@@ -1490,7 +1527,7 @@ function createBridgeServer(options = {}) {
       setCommonHeaders(response);
       const address = server.address();
       const expectedPort = address && typeof address !== "string" ? address.port : requestedPort;
-      validateHostHeader(request, expectedPort, bind);
+      validateHostHeader(request, expectedPort, bind, tailscaleServeHosts);
       const allowedOrigin = validateOrigin(request, response, allowedOrigins);
       const path = requestPath(request);
       const methods = expectedMethods(path);
@@ -1515,6 +1552,7 @@ function createBridgeServer(options = {}) {
           allowedOrigin,
           tokenRequired: Boolean(options.token),
           allowedOrigins: [...allowedOrigins],
+          tailscaleServeHosts,
           activeGenerations: active.size,
           now: (/* @__PURE__ */ new Date()).toISOString()
         });
@@ -1561,6 +1599,7 @@ function parseCliArguments(args) {
   const origins = [];
   let token;
   const modelDirectories = [];
+  const tailscaleServeHosts = [];
   let help = false;
   for (let index = 0; index < args.length; index += 1) {
     const argument = args[index];
@@ -1599,15 +1638,22 @@ function parseCliArguments(args) {
       if (inlineValue === void 0) index += 1;
       if (!value.trim()) throw new BridgeError("INVALID_MODELS_DIRECTORY", "--models-dir must not be empty.");
       modelDirectories.push(resolve2(value));
+    } else if (flag === "--tailscale-host" || flag === "--proxy-host") {
+      const value = inlineValue ?? nextArgument(args, index, flag);
+      if (inlineValue === void 0) index += 1;
+      tailscaleServeHosts.push(normalizeTailscaleServeHost(value));
     } else {
       throw new BridgeError("UNKNOWN_ARGUMENT", `Unknown argument: ${argument}`);
     }
   }
-  if (!isLoopbackBindAddress(bind) && (!token || token.length < 32)) {
-    throw new BridgeError("REMOTE_BIND_TOKEN_REQUIRED", "A token of at least 32 characters is required with a Tailscale --bind.");
+  if (tailscaleServeHosts.length > 0 && !isLoopbackBindAddress(bind)) {
+    throw new BridgeError("TAILSCALE_SERVE_LOOPBACK_REQUIRED", "--tailscale-host requires the default loopback --bind.");
   }
-  if (!isLoopbackBindAddress(bind) && origins.length === 0) {
-    throw new BridgeError("REMOTE_BIND_ORIGIN_REQUIRED", "An explicit --origin is required with a Tailscale --bind.");
+  if ((!isLoopbackBindAddress(bind) || tailscaleServeHosts.length > 0) && (!token || token.length < 32)) {
+    throw new BridgeError("REMOTE_BIND_TOKEN_REQUIRED", "A token of at least 32 characters is required with Tailscale exposure.");
+  }
+  if ((!isLoopbackBindAddress(bind) || tailscaleServeHosts.length > 0) && origins.length === 0) {
+    throw new BridgeError("REMOTE_BIND_ORIGIN_REQUIRED", "An explicit --origin is required with Tailscale exposure.");
   }
   return {
     port,
@@ -1615,6 +1661,7 @@ function parseCliArguments(args) {
     origins: origins.length ? [...new Set(origins)] : [...DEFAULT_DEV_ORIGINS],
     token,
     modelDirectories: [...new Set(modelDirectories)],
+    tailscaleServeHosts: [...new Set(tailscaleServeHosts)],
     help
   };
 }
@@ -1622,7 +1669,7 @@ function usage() {
   return `Draw Things Web local connector ${BRIDGE_VERSION}
 
 Usage:
-  draw-things-bridge.mjs [--port 47821] [--bind 127.0.0.1] [--origin https://app.example]... [--token SECRET] [--models-dir PATH]...
+  draw-things-bridge.mjs [--port 47821] [--bind 127.0.0.1] [--origin https://app.example]... [--token SECRET] [--tailscale-host HOST[:PORT]]... [--models-dir PATH]...
 
 Options:
   --port <number>          Connector port (default: 47821)
@@ -1630,11 +1677,14 @@ Options:
   --origin <origin>        Exact allowed website Origin; repeat for multiple sites
   --token <secret>         Optional bearer / X-Draw-Things-Bridge-Token value
   --pairing-code <secret>  Alias for --token
+  --tailscale-host <host>  Exact *.ts.net Tailscale Serve hostname and optional HTTPS port
+  --proxy-host <host>      Alias for --tailscale-host
   --models-dir <path>      Additional Draw Things model folder; repeat as needed
   --help                   Show this help
 
 The connector only binds loopback or an explicit Tailscale address and only contacts Draw Things on loopback.
 Tailscale binds require an explicit origin and a token of at least 32 characters.
+Tailscale Serve hosts keep the connector on loopback and also require an explicit origin and 32-character token.
 Without --origin, localhost Vite development origins on ports 5173 and 4173 are allowed.`;
 }
 async function startBridge(args = process.argv.slice(2)) {

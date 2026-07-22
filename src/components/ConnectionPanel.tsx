@@ -23,7 +23,7 @@ import type {
   DiscoveredEndpoint,
 } from '../domain/types'
 import { createPairingToken } from '../lib/defaults'
-import { suggestedBridgeUrl, tailscaleAddress } from '../lib/network'
+import { isTailscaleMagicDnsHost, suggestedBridgeUrl, tailscaleAddress } from '../lib/network'
 import { shellQuote } from '../lib/shell'
 import { Button, Field, IconButton, Segmented, TextInput, Toggle } from './ui'
 
@@ -104,10 +104,35 @@ export function ConnectionPanel({
   const [draftTesting, setDraftTesting] = useState(false)
 
   const origin = typeof window === 'undefined' ? 'http://127.0.0.1:5173' : window.location.origin
+  const secureHostedPage = useMemo(() => {
+    try {
+      const page = new URL(pageUrl)
+      return page.protocol === 'https:' && !['localhost', '127.0.0.1', '::1'].includes(page.hostname)
+    } catch {
+      return false
+    }
+  }, [pageUrl])
+  const bridgeEndpoint = useMemo(() => {
+    try {
+      return new URL(draft.bridgeUrl)
+    } catch {
+      return null
+    }
+  }, [draft.bridgeUrl])
+  const bridgeUsesLoopback = bridgeEndpoint
+    ? ['localhost', '127.0.0.1', '::1'].includes(bridgeEndpoint.hostname)
+    : false
+  const tailscaleServeAuthority = bridgeEndpoint?.protocol === 'https:'
+    && isTailscaleMagicDnsHost(bridgeEndpoint.hostname)
+    ? `${bridgeEndpoint.hostname.toLowerCase()}:${bridgeEndpoint.port || '443'}`
+    : undefined
   const bridgeCommand = useMemo(
-    () => `node ~/Downloads/draw-things-bridge.mjs${tailscaleHost ? ` --bind ${shellQuote(tailscaleHost)}` : ''} --origin ${shellQuote(origin)} --token ${shellQuote(draft.bridgePairingToken)}`,
-    [draft.bridgePairingToken, origin, tailscaleHost],
+    () => `node ~/Downloads/draw-things-bridge.mjs${tailscaleHost ? ` --bind ${shellQuote(tailscaleHost)}` : tailscaleServeAuthority ? ` --proxy-host ${shellQuote(tailscaleServeAuthority)}` : ''} --origin ${shellQuote(origin)} --token ${shellQuote(draft.bridgePairingToken)}`,
+    [draft.bridgePairingToken, origin, tailscaleHost, tailscaleServeAuthority],
   )
+  const tailscaleServeCommand = tailscaleServeAuthority
+    ? `/Applications/Tailscale.app/Contents/MacOS/Tailscale serve --bg --yes --https=${tailscaleServeAuthority.slice(tailscaleServeAuthority.lastIndexOf(':') + 1)} http://127.0.0.1:47821`
+    : ''
   const bridgeMatchesSavedConnection = draft.bridgeUrl === connection.bridgeUrl
     && draft.bridgePairingToken === connection.bridgePairingToken
   const savedBridgeReady = bridgeMatchesSavedConnection && Boolean(bridge?.ok)
@@ -227,6 +252,26 @@ export function ConnectionPanel({
                 </div>
               ) : null}
 
+              {secureHostedPage && draft.transport === 'bridge' ? (
+                <div className="remote-bridge-setup">
+                  <div className={`notice ${bridgeUsesLoopback ? 'notice--warning' : 'notice--info'}`}>
+                    {bridgeUsesLoopback ? <AlertTriangle size={17} /> : <ShieldCheck size={17} />}
+                    <p>
+                      <strong>{bridgeUsesLoopback ? '휴대폰의 127.0.0.1은 Mac이 아닙니다.' : '다른 기기용 HTTPS 커넥터 주소를 사용합니다.'}</strong>
+                      Mac에서 이 사이트를 열 때는 루프백 주소가 동작하지만, Android·iPhone에서는 Tailscale Serve 같은 HTTPS 주소가 필요합니다. Android가 로컬 네트워크 접근 권한을 요청하면 허용하세요.
+                    </p>
+                  </div>
+                  <div className="form-grid">
+                    <Field label="휴대폰용 커넥터 HTTPS 주소" hint="예: https://my-mac.my-tailnet.ts.net:47822">
+                      <TextInput value={draft.bridgeUrl} onChange={(event) => update('bridgeUrl', event.target.value)} spellCheck={false} placeholder="https://my-mac.my-tailnet.ts.net:47822" />
+                    </Field>
+                    <Field label="커넥터 페어링 토큰" hint="Mac에서 실행한 커넥터의 --token 값과 같아야 합니다.">
+                      <TextInput type="password" value={draft.bridgePairingToken} onChange={(event) => update('bridgePairingToken', event.target.value)} autoComplete="off" />
+                    </Field>
+                  </div>
+                </div>
+              ) : null}
+
               {draft.transport === 'bridge' ? (
                 <div className={`bridge-card ${bridgeReady ? 'is-online' : ''} ${bridgeFailed ? 'is-error' : ''} ${draftTesting ? 'is-checking' : ''}`}>
                   <div className="bridge-card__icon"><Server size={22} /></div>
@@ -251,6 +296,12 @@ export function ConnectionPanel({
                           </Button>
                         </div>
                         <code className="command-preview">{bridgeCommand}</code>
+                        {tailscaleServeCommand ? (
+                          <>
+                            <small className="bridge-serve-note">별도 Terminal에서 Tailscale HTTPS 진입점도 실행하세요.</small>
+                            <code className="command-preview">{tailscaleServeCommand}</code>
+                          </>
+                        ) : null}
                         {copyFailed ? <small className="copy-fallback" role="status">자동 복사를 사용할 수 없습니다. 위 명령을 길게 눌러 직접 복사하세요.</small> : null}
                       </>
                     ) : null}
@@ -373,7 +424,7 @@ export function ConnectionPanel({
                       <TextInput value={draft.apiBasePath} onChange={(event) => update('apiBasePath', event.target.value)} placeholder="예: proxy/draw-things" />
                     </Field>
                   ) : null}
-                  {draft.transport === 'bridge' ? (
+                  {draft.transport === 'bridge' && !secureHostedPage ? (
                     <>
                       <Field label="커넥터 주소">
                         <TextInput value={draft.bridgeUrl} onChange={(event) => update('bridgeUrl', event.target.value)} spellCheck={false} />

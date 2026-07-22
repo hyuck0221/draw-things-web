@@ -23,6 +23,20 @@ node public/bridge/draw-things-bridge.mjs \
   --token a-strong-random-token-of-at-least-32-characters
 ```
 
+When the website itself is served over HTTPS (for example, Vercel), keep the connector on loopback and put Tailscale Serve HTTPS in front of it. The `--tailscale-host` allowlist is accepted only from a loopback proxy, so a remote client cannot spoof this Host header against a directly exposed connector.
+
+```sh
+node public/bridge/draw-things-bridge.mjs \
+  --tailscale-host your-mac.your-tailnet.ts.net:47822 \
+  --origin https://your-site.vercel.app \
+  --token a-strong-random-token-of-at-least-32-characters
+
+/Applications/Tailscale.app/Contents/MacOS/Tailscale serve \
+  --bg --yes --https=47822 http://127.0.0.1:47821
+```
+
+The website connector URL is then `https://your-mac.your-tailnet.ts.net:47822`. The Draw Things upstream host remains `127.0.0.1`.
+
 ## Endpoint contract
 
 - `GET /v1/bridge/health`: connector health, origin policy, and active generation count.

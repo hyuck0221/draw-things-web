@@ -172,6 +172,9 @@ export default function App() {
   }, [preferences, workspace.activeId])
 
   useEffect(() => {
+    if (!preferences.connectionConfigured || preferences.connection.transport !== 'bridge') {
+      return
+    }
     let cancelled = false
     const check = async () => {
       try {
@@ -184,7 +187,7 @@ export default function App() {
     void check()
     const interval = window.setInterval(check, 5_000)
     return () => { cancelled = true; window.clearInterval(interval) }
-  }, [preferences.connection])
+  }, [preferences.connection, preferences.connectionConfigured])
 
   const activeSession = workspace.activeSession
   const prompt = activeSession?.draftPrompt ?? ''
@@ -240,6 +243,7 @@ export default function App() {
 
   const saveConnection = (connection: ConnectionConfig) => {
     modelRequestSequence.current += 1
+    setBridge(null)
     setInstalledModels([])
     setModelsMessage('')
     setModelsError(false)

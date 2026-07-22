@@ -68,6 +68,33 @@ export function normalizeBridgeBindAddress(value: unknown): string {
   )
 }
 
+export function normalizeTailscaleServeHost(value: unknown): string {
+  if (typeof value !== 'string' || !value.trim()) {
+    throw new BridgeError('INVALID_TAILSCALE_HOST', 'Tailscale Serve host must be a non-empty hostname with an optional port.')
+  }
+  const raw = value.trim().toLowerCase()
+  if (raw.includes('://')) {
+    throw new BridgeError('INVALID_TAILSCALE_HOST', 'Tailscale Serve host must not include a URL scheme.')
+  }
+  let parsed: URL
+  try {
+    parsed = new URL(`https://${raw}`)
+  } catch {
+    throw new BridgeError('INVALID_TAILSCALE_HOST', `Invalid Tailscale Serve host: ${value}`)
+  }
+  const hostname = parsed.hostname.replace(/^\[|\]$/g, '').replace(/\.$/, '').toLowerCase()
+  const port = parsed.port ? Number(parsed.port) : 443
+  if (parsed.username || parsed.password || parsed.pathname !== '/' || parsed.search || parsed.hash
+    || !hostname.endsWith('.ts.net') || hostname === 'ts.net'
+    || !Number.isInteger(port) || port < 1 || port > 65_535) {
+    throw new BridgeError(
+      'INVALID_TAILSCALE_HOST',
+      'Tailscale Serve host must be an exact *.ts.net hostname with an optional port and no path.',
+    )
+  }
+  return `${hostname}:${port}`
+}
+
 export function normalizeLoopbackHost(value: unknown): LoopbackHost {
   const raw = typeof value === 'string' ? value.trim().toLowerCase() : '127.0.0.1'
   const unbracketed = raw.startsWith('[') && raw.endsWith(']') ? raw.slice(1, -1) : raw
@@ -214,6 +241,7 @@ export function validateHostHeader(
   request: IncomingMessage,
   expectedPort: number,
   bindAddress = '127.0.0.1',
+  tailscaleServeHosts: readonly string[] = [],
 ): void {
   const header = request.headers.host
   if (!header || /[\\/?#@\s]/.test(header)) {
@@ -226,13 +254,24 @@ export function validateHostHeader(
     throw new BridgeError('INVALID_HOST', 'Invalid Host header.', 403)
   }
   const host = parsed.hostname.replace(/^\[|\]$/g, '').toLowerCase()
-  const port = parsed.port ? Number(parsed.port) : 80
+  const explicitPort = parsed.port ? Number(parsed.port) : undefined
   const allowedHosts = isLoopbackBindAddress(bindAddress)
     ? LOOPBACK_HOSTS as readonly string[]
     : [bindAddress]
-  if (!allowedHosts.includes(host) || port !== expectedPort) {
-    throw new BridgeError('INVALID_HOST', 'Host must exactly address the configured connector bind and port.', 403)
-  }
+  if (allowedHosts.includes(host) && (explicitPort ?? 80) === expectedPort) return
+
+  const remoteAddress = request.socket.remoteAddress?.toLowerCase()
+  const fromLoopbackProxy = remoteAddress === '127.0.0.1'
+    || remoteAddress === '::1'
+    || remoteAddress === '::ffff:127.0.0.1'
+  const proxyPort = explicitPort ?? 443
+  const matchesTailscaleServe = fromLoopbackProxy && tailscaleServeHosts.some((authority) => {
+    const separator = authority.lastIndexOf(':')
+    return authority.slice(0, separator) === host && Number(authority.slice(separator + 1)) === proxyPort
+  })
+  if (matchesTailscaleServe) return
+
+  throw new BridgeError('INVALID_HOST', 'Host must exactly address the configured connector bind, port, or trusted Tailscale Serve host.', 403)
 }
 
 export function validateOrigin(

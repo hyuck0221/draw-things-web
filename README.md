@@ -114,6 +114,48 @@ pnpm bridge
 
 ## Tailscale로 모바일에서 접속
 
+### Vercel 주소를 그대로 사용하는 경우
+
+`https://...vercel.app`에서 접속한 브라우저는 Mac의 평문 `http://100.x.y.z` 커넥터를 안전하게 호출할 수 없습니다. Android의 `127.0.0.1`도 Mac이 아니라 Android 자신을 가리킵니다. 따라서 Vercel HTTPS와 Mac의 루프백 커넥터 사이에 Tailscale Serve HTTPS를 둡니다. 먼저 Tailscale을 최신 보안 버전으로 업데이트하고 MagicDNS 호스트 이름을 확인합니다.
+
+```sh
+/Applications/Tailscale.app/Contents/MacOS/Tailscale version
+/Applications/Tailscale.app/Contents/MacOS/Tailscale status
+```
+
+Mac의 첫 번째 Terminal에서 배포 사이트 origin, 32자 이상의 토큰, 모바일에서 사용할 정확한 MagicDNS 주소를 지정해 커넥터를 실행합니다.
+
+```sh
+node ~/Downloads/draw-things-bridge.mjs \
+  --origin https://your-site.vercel.app \
+  --token '<64자리-무작위-16진수-토큰>' \
+  --proxy-host your-mac.your-tailnet.ts.net:47822
+```
+
+두 번째 Terminal에서 기존 Serve 포트는 건드리지 않고 새 HTTPS 진입점만 추가합니다.
+
+```sh
+/Applications/Tailscale.app/Contents/MacOS/Tailscale serve \
+  --bg --yes --https=47822 http://127.0.0.1:47821
+```
+
+Android의 Vercel 연결 화면에는 다음 값을 입력합니다.
+
+| 모바일 연결 값 | 설정 |
+| --- | --- |
+| 연결 경로 | `로컬 커넥터` |
+| 휴대폰용 커넥터 HTTPS 주소 | `https://your-mac.your-tailnet.ts.net:47822` |
+| 커넥터 페어링 토큰 | Mac의 `--token`과 동일한 값 |
+| Draw Things 프로토콜 | `HTTP` |
+| Draw Things 호스트 | `127.0.0.1` |
+| Draw Things 포트 | Mac의 Draw Things API 포트 |
+
+Android가 로컬 네트워크 접근 권한을 묻는다면 허용합니다. 모든 값은 해당 모바일 브라우저의 Local Storage에만 저장됩니다. 최초 저장 뒤에는 같은 브라우저에서 자동으로 다시 연결하고 5초마다 커넥터 상태를 확인합니다.
+
+이 HTTPS 진입점만 제거하려면 `tailscale serve --https=47822 off`를 사용합니다. 다른 Serve 설정을 보존하려면 전체 `serve reset`은 사용하지 마십시오.
+
+### 웹사이트도 Mac에서 직접 미리보기하는 경우
+
 모바일과 Mac이 같은 tailnet에 연결되어 있으면 물리 LAN 전체가 아닌 **이 Mac의 실제 Tailscale IP에만** 웹 미리보기와 커넥터를 바인딩할 수 있습니다. `0.0.0.0`은 Wi-Fi·유선 LAN에도 노출되므로 사용하지 않습니다.
 
 macOS 앱 번들에서 현재 Tailscale IPv4를 확인하고 프로덕션 빌드를 만듭니다.

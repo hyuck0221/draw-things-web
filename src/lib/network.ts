@@ -32,6 +32,13 @@ export function tailscaleAddress(host: string): string | undefined {
   return undefined
 }
 
+export function isTailscaleMagicDnsHost(host: string): boolean {
+  const normalized = normalizedHost(host).replace(/\.$/, '')
+  return normalized !== 'ts.net'
+    && normalized.endsWith('.ts.net')
+    && /^[a-z0-9.-]+$/.test(normalized)
+}
+
 export function targetAddressSpaceForHost(host: string): BrowserTargetAddressSpace {
   const normalized = normalizedHost(host)
   if (normalized === 'localhost' || normalized === '::1') return 'loopback'
@@ -45,7 +52,7 @@ export function targetAddressSpaceForHost(host: string): BrowserTargetAddressSpa
     || (ipv4[0] === 169 && ipv4[1] === 254)
     || normalized === '0.0.0.0')
   const ipv6 = canonicalIpv6(normalized)
-  if (privateIpv4 || isTailscaleIpv4(normalized) || normalized.endsWith('.local')
+  if (privateIpv4 || isTailscaleIpv4(normalized) || isTailscaleMagicDnsHost(normalized) || normalized.endsWith('.local')
     || (ipv6 && (ipv6.startsWith('fc') || ipv6.startsWith('fd') || ipv6.startsWith('fe80:')))) {
     return 'local'
   }

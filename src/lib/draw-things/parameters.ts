@@ -232,6 +232,10 @@ export function sanitizeHttpParameters(parameters: GenerationParameters) {
   for (const [key, value] of Object.entries(parameters)) {
     if (HTTP_UNWRITABLE.has(key)) continue
     if (key === 'tea_cache_end' && Number(value) < 0) continue
+    // Draw Things interprets an explicitly empty upscaler name as an enabled
+    // 4x upscaler and returns a black/neon image. An omitted field correctly
+    // keeps upscaling disabled.
+    if (key === 'upscaler' && typeof value === 'string' && !value.trim()) continue
     safe[key] = value
   }
   return safe

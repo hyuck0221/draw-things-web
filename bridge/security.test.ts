@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { normalizeBridgeBindAddress, normalizeConnection, normalizeFingerprint, normalizeOrigin } from './security.ts'
+import { normalizeBridgeBindAddress, normalizeConnection, normalizeFingerprint, normalizeOrigin, normalizeTailscaleServeHost } from './security.ts'
 
 Object.defineProperty(globalThis, 'localStorage', {
   configurable: true,
@@ -27,6 +27,17 @@ describe('connector security boundaries', () => {
     const raw = 'a1'.repeat(32)
     expect(normalizeFingerprint(raw)).toBe(Array.from({ length: 32 }, () => 'A1').join(':'))
     expect(() => normalizeFingerprint('aa:bb')).toThrow(/64 hexadecimal/)
+  })
+
+  it('accepts only exact Tailscale Serve DNS hosts', () => {
+    expect(normalizeTailscaleServeHost('hshim.example-tailnet.ts.net:47822'))
+      .toBe('hshim.example-tailnet.ts.net:47822')
+    expect(normalizeTailscaleServeHost('hshim.example-tailnet.ts.net'))
+      .toBe('hshim.example-tailnet.ts.net:443')
+    expect(() => normalizeTailscaleServeHost('https://hshim.example-tailnet.ts.net:47822'))
+      .toThrow(/must not include a URL scheme/)
+    expect(() => normalizeTailscaleServeHost('example.com:47822')).toThrow(/exact \*\.ts\.net/)
+    expect(() => normalizeTailscaleServeHost('hshim.example-tailnet.ts.net/path')).toThrow(/no path/)
   })
 
   it('rejects origin values containing paths or credentials', () => {

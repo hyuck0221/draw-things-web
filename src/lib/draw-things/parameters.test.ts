@@ -15,5 +15,18 @@ describe('Draw Things parameter catalog', () => {
     expect(safe).not.toHaveProperty('color_calibration')
     expect(safe).not.toHaveProperty('expand_prompt_to_json')
     expect(safe).not.toHaveProperty('tea_cache_end')
+    expect(safe).not.toHaveProperty('upscaler')
+  })
+
+  it('keeps an explicitly selected upscaler', () => {
+    const safe = sanitizeHttpParameters({
+      ...DEFAULT_PARAMETERS,
+      upscaler: 'realesrgan_x2.ckpt',
+      upscaler_scale: 2,
+    })
+    expect(safe).toMatchObject({
+      upscaler: 'realesrgan_x2.ckpt',
+      upscaler_scale: 2,
+    })
   })
 })

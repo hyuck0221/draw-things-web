@@ -1,5 +1,5 @@
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
-import { createServer, type Server } from 'node:http'
+import { createServer, request as requestHttp, type Server } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
@@ -54,6 +54,70 @@ describe('loopback bridge HTTP surface', () => {
     ])
     expect(parsed.bind).toBe('100.121.194.59')
     expect(parsed.origins).toEqual(['http://100.121.194.59:5173'])
+  })
+
+  it('requires a loopback bind, explicit origin, and long token for Tailscale Serve', () => {
+    expect(() => parseCliArguments(['--tailscale-host', 'hshim.example-tailnet.ts.net:47822']))
+      .toThrow(/token of at least 32/)
+    expect(() => parseCliArguments([
+      '--tailscale-host', 'hshim.example-tailnet.ts.net:47822',
+      '--token', 'a'.repeat(64),
+    ])).toThrow(/explicit --origin/)
+    expect(() => parseCliArguments([
+      '--bind', '100.121.194.59',
+      '--tailscale-host', 'hshim.example-tailnet.ts.net:47822',
+      '--origin', 'https://canvas.example',
+      '--token', 'a'.repeat(64),
+    ])).toThrow(/loopback --bind/)
+
+    const parsed = parseCliArguments([
+      '--tailscale-host', 'hshim.example-tailnet.ts.net:47822',
+      '--origin', 'https://canvas.example',
+      '--token', 'a'.repeat(64),
+    ])
+    expect(parsed.bind).toBe('127.0.0.1')
+    expect(parsed.tailscaleServeHosts).toEqual(['hshim.example-tailnet.ts.net:47822'])
+  })
+
+  it('accepts only the configured Tailscale Serve Host through the loopback proxy', async () => {
+    const token = 'a'.repeat(64)
+    const bridgePort = await listen(createBridgeServer({
+      port: 0,
+      origins: ['https://canvas.example'],
+      token,
+      tailscaleServeHosts: ['hshim.example-tailnet.ts.net:47822'],
+    }))
+    const requestHealth = (host: string) => new Promise<{ status: number; body: Record<string, unknown> }>((resolve, reject) => {
+      const request = requestHttp({
+        hostname: '127.0.0.1',
+        port: bridgePort,
+        path: '/v1/bridge/health',
+        headers: {
+          Host: host,
+          Origin: 'https://canvas.example',
+          'X-Draw-Things-Pairing-Token': token,
+        },
+      }, (response) => {
+        const chunks: Buffer[] = []
+        response.on('data', (chunk: Buffer) => chunks.push(Buffer.from(chunk)))
+        response.once('end', () => resolve({
+          status: response.statusCode ?? 0,
+          body: JSON.parse(Buffer.concat(chunks).toString('utf8')) as Record<string, unknown>,
+        }))
+      })
+      request.once('error', reject)
+      request.end()
+    })
+
+    const accepted = await requestHealth('hshim.example-tailnet.ts.net:47822')
+    expect(accepted.status).toBe(200)
+    expect(accepted.body).toMatchObject({
+      ok: true,
+      tailscaleServeHosts: ['hshim.example-tailnet.ts.net:47822'],
+    })
+
+    const rejected = await requestHealth('other.example-tailnet.ts.net:47822')
+    expect(rejected.status).toBe(403)
   })
 
   it('enforces exact Origin and pairing token while supporting PNA preflight', async () => {
@@ -162,7 +226,13 @@ describe('loopback bridge HTTP surface', () => {
           mode: 'txt2img',
           prompt: 'cat',
           negativePrompt: '',
-          parameters: { width: 512, height: 512, tea_cache_end: -1 },
+          parameters: {
+            width: 512,
+            height: 512,
+            tea_cache_end: -1,
+            upscaler: '',
+            upscaler_scale: 0,
+          },
         },
       }),
     })
@@ -179,6 +249,8 @@ describe('loopback bridge HTTP surface', () => {
       height: 512,
     })
     expect(upstreamGenerationBody).not.toHaveProperty('tea_cache_end')
+    expect(upstreamGenerationBody).not.toHaveProperty('upscaler')
+    expect(upstreamGenerationBody).toHaveProperty('upscaler_scale', 0)
   })
 
   it('cancels an active upstream request by generation id', async () => {
