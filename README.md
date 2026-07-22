@@ -98,7 +98,7 @@ API는 기본적으로 Mac 자신에게만 열립니다. Android의 Tailscale IP
 pnpm build
 DRAW_THINGS_TAILSCALE_IP=$(/Applications/Tailscale.app/Contents/MacOS/Tailscale ip -4)
 DRAW_THINGS_ANDROID_TAILSCALE_IP=100.64.0.2
-DRAW_THINGS_ALLOWED_CLIENTS="$DRAW_THINGS_ANDROID_TAILSCALE_IP" pnpm preview -- \
+DRAW_THINGS_ALLOWED_CLIENTS="$DRAW_THINGS_ANDROID_TAILSCALE_IP" pnpm preview \
   --host "$DRAW_THINGS_TAILSCALE_IP" \
   --port 5173 \
   --strictPort
