@@ -54,9 +54,11 @@ const IDLE_GENERATION: GenerationState = {
   message: '',
 }
 
-const MAXIMUM_DIMENSION = 4_096
-const MAXIMUM_OUTPUT_IMAGES = 4
-const MAXIMUM_TOTAL_PIXELS = 4_096 * 4_096
+const MAXIMUM_DIMENSION = 8_192
+const MAXIMUM_BATCH_COUNT = 100
+const MAXIMUM_BATCH_SIZE = 4
+const MAXIMUM_OUTPUT_IMAGES = MAXIMUM_BATCH_COUNT * MAXIMUM_BATCH_SIZE
+const MAXIMUM_TOTAL_PIXELS = 8_192 * 8_192
 const MAXIMUM_INIT_IMAGE_CHARACTERS = 120 * 1024 * 1024
 
 function dataUrlDimensions(dataUrl: string) {
@@ -117,16 +119,19 @@ export default function App() {
   const terminalRequest = useRef<string | null>(null)
   const modelRequestSequence = useRef(0)
   const modelRefreshInFlight = useRef<Promise<void> | null>(null)
+  const modelCatalogLoadedOrigin = useRef<string | null>(null)
 
   const mergeRemoteOptions = useCallback((remote: Record<string, unknown>) => {
     const validKeys = new Set(PARAMETER_DEFINITIONS.map((definition) => definition.key))
     const remoteModel = typeof remote.model === 'string' ? remote.model.trim() : ''
     if (remoteModel) {
-      setInstalledModels((current) => current.length === 1 && current[0]?.file === remoteModel
+      setInstalledModels((current) => current.some((model) => model.file === remoteModel)
         ? current
-        : [{ file: remoteModel, name: remoteModel, source: 'http-current' }])
-      setModelsMessage('Draw Things에서 현재 선택한 모델입니다.')
-      setModelsError(false)
+        : [{ file: remoteModel, name: remoteModel, source: 'http-current' }, ...current])
+      if (modelCatalogLoadedOrigin.current !== window.location.origin) {
+        setModelsMessage('Draw Things에서 현재 선택한 모델입니다.')
+        setModelsError(false)
+      }
     }
     setPreferences((current) => {
       const apiOrigin = window.location.origin
@@ -176,6 +181,15 @@ export default function App() {
     return () => window.clearTimeout(timeout)
   }, [preferences, preferencesReadyRevision, workspace.activeId, workspace.loading, workspace.revision])
 
+  useEffect(() => {
+    if (alert?.kind !== 'success') return
+    const currentAlert = alert
+    const timeout = window.setTimeout(() => {
+      setAlert((current) => current === currentAlert ? null : current)
+    }, 3_500)
+    return () => window.clearTimeout(timeout)
+  }, [alert])
+
   const activeSession = workspace.activeSession
   const prompt = activeSession?.draftPrompt ?? ''
   const useSelected = Boolean(activeSession?.useSelectedImage)
@@ -183,7 +197,9 @@ export default function App() {
   const mode: GenerationMode = selected && useSelected ? 'img2img' : 'txt2img'
   const online = monitor.phase === 'online' && Boolean(monitor.result?.ok)
   const capabilities = monitor.result?.capabilities
+  const selectedModel = String(preferences.parameters.model ?? '').trim()
   const canGenerate = Boolean(capabilities?.canGenerate
+    && selectedModel
     && (mode === 'txt2img' || capabilities.canImageToImage))
   const models = useMemo(() => {
     const merged = new Map<string, DrawThingsModel>()
@@ -210,16 +226,16 @@ export default function App() {
         )
         if (modelRequestSequence.current !== sequence) return
         setInstalledModels(result.models)
-        const currentModel = result.models[0]?.file
+        const currentModel = result.currentModel
         if (syncSelection && currentModel) {
           setPreferences((current) => String(current.parameters.model ?? '') === currentModel
             ? current
             : { ...current, parameters: { ...current.parameters, model: currentModel } })
         }
         setModelsMessage(result.warnings[0] ?? (result.models.length
-          ? 'Draw Things에서 현재 선택한 모델입니다.'
+          ? `Draw Things에 설치된 주 모델 ${result.models.length}개를 확인했습니다.`
           : 'Draw Things에서 선택한 모델을 확인하지 못했습니다.'))
-        setModelsError(!result.ok || result.stale)
+        setModelsError(!result.ok || result.stale || result.warnings.length > 0)
       } catch (error) {
         if (modelRequestSequence.current !== sequence) return
         setInstalledModels([])
@@ -239,6 +255,13 @@ export default function App() {
   const refreshCurrentModel = useCallback(() => {
     void refreshModels(true)
   }, [refreshModels])
+
+  useEffect(() => {
+    if (!online || generationState.active
+      || modelCatalogLoadedOrigin.current === window.location.origin) return
+    modelCatalogLoadedOrigin.current = window.location.origin
+    void refreshModels(false)
+  }, [generationState.active, online, refreshModels])
 
   const changeModel = (nextFile: string) => {
     setPreferences((current) => ({
@@ -373,19 +396,28 @@ export default function App() {
       const height = Number(requestParameters.height)
       const batchCount = Number(requestParameters.batch_count)
       const batchSize = Number(requestParameters.batch_size)
+      const upscaler = String(requestParameters.upscaler ?? '').trim()
+      const upscalerScale = Number(requestParameters.upscaler_scale ?? 0)
+      const outputScale = upscaler && upscalerScale > 1 ? upscalerScale : 1
       const outputImages = batchCount * batchSize
-      const totalPixels = width * height * outputImages
+      const totalPixels = width * height * outputImages * outputScale * outputScale
+      if (!String(requestParameters.model ?? '').trim()) {
+        setAlert({ kind: 'error', message: 'Draw Things 생성 모델을 먼저 선택하세요.' })
+        return
+      }
       if (width < 128 || height < 128 || width > MAXIMUM_DIMENSION || height > MAXIMUM_DIMENSION) {
         setAlert({ kind: 'error', message: `이미지 너비와 높이는 128–${MAXIMUM_DIMENSION} 범위여야 합니다.` })
         return
       }
       if (!Number.isInteger(batchCount) || !Number.isInteger(batchSize)
-        || batchCount < 1 || batchSize < 1 || outputImages > MAXIMUM_OUTPUT_IMAGES) {
+        || batchCount < 1 || batchCount > MAXIMUM_BATCH_COUNT
+        || batchSize < 1 || batchSize > MAXIMUM_BATCH_SIZE
+        || outputImages > MAXIMUM_OUTPUT_IMAGES) {
         setAlert({ kind: 'error', message: `한 요청에서는 배치 반복 × 배치 크기로 최대 ${MAXIMUM_OUTPUT_IMAGES}개 이미지를 생성할 수 있습니다.` })
         return
       }
       if (!Number.isSafeInteger(totalPixels) || totalPixels > MAXIMUM_TOTAL_PIXELS) {
-        setAlert({ kind: 'error', message: '한 요청의 총 출력 해상도는 4096×4096 픽셀 예산을 넘을 수 없습니다.' })
+        setAlert({ kind: 'error', message: '배치와 업스케일을 포함한 총 출력 해상도는 8192×8192 픽셀 예산을 넘을 수 없습니다.' })
         return
       }
       if (mode === 'img2img' && selected && selected.dataUrl.length > MAXIMUM_INIT_IMAGE_CHARACTERS) {
@@ -610,7 +642,7 @@ export default function App() {
         <InspectorPanel selected={selected} parameters={preferences.parameters} models={models} modelsLoading={modelsLoading} modelsMessage={modelsMessage} onRefreshModels={refreshCurrentModel} onChange={updateParameter} onOpenAll={() => setSettingsOpen(true)} onUseSelected={() => updateActive((session) => ({ ...session, useSelectedImage: !session.useSelectedImage }))} useSelected={useSelected} />
       </div>
 
-      <SettingsPanel open={settingsOpen} mode={mode} values={preferences.parameters} models={models} onChange={updateParameter} onClose={() => setSettingsOpen(false)} onReset={() => setPreferences((current) => ({ ...current, parameters: { ...DEFAULT_PARAMETERS } }))} />
+      <SettingsPanel open={settingsOpen} mode={mode} values={preferences.parameters} models={models} onChange={updateParameter} onClose={() => setSettingsOpen(false)} onReset={() => setPreferences((current) => ({ ...current, parameters: { ...DEFAULT_PARAMETERS, model: current.parameters.model ?? '' } }))} />
       {apiStatusOpen ? (
         <ConnectionPanel
           open

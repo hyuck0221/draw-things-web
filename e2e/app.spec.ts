@@ -2,7 +2,26 @@ import { expect, test, type Page } from '@playwright/test'
 
 const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9Wl+AAAAAASUVORK5CYII='
 
+async function mockModelCatalog(page: Page, currentModel = 'mock.ckpt') {
+  await page.route('**/local-api/v1/models', async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        models: [
+          { file: currentModel, name: 'Current model', source: 'local-metadata' },
+          { file: 'installed-second.ckpt', name: 'Installed second', source: 'local-metadata' },
+        ],
+        directoriesScanned: 1,
+        warnings: [],
+      }),
+    })
+  })
+}
+
 async function mockOptions(page: Page, overrides: Record<string, unknown> = {}) {
+  const currentModel = typeof overrides.model === 'string' ? overrides.model : 'mock.ckpt'
+  await mockModelCatalog(page, currentModel)
   await page.route('**/sdapi/v1/options', async (route) => {
     await route.fulfill({
       status: 200,
@@ -43,11 +62,17 @@ test('opens the canvas and the complete HTTP parameter drawer', async ({ page },
   await expect(page.getByLabel('이미지 프롬프트')).toBeVisible()
   await expect(page.getByRole('button', { name: /API 상태: Draw Things 연결됨/ })).toBeVisible()
 
+  const modelSelect = page.locator('.inspector-panel').getByLabel('현재 Draw Things 모델')
+  await expect(modelSelect.locator('option')).toHaveCount(2)
+  await modelSelect.selectOption('installed-second.ckpt')
+
   await page.getByRole('button', { name: '전체 API 설정' }).click()
   await expect(page.getByRole('complementary', { name: '전체 생성 설정' })).toBeVisible()
   await expect(page.getByPlaceholder('설정 이름 또는 API 키 검색')).toBeVisible()
   await page.getByPlaceholder('설정 이름 또는 API 키 검색').fill('tea cache')
   await expect(page.getByRole('checkbox', { name: 'TeaCache', exact: true })).toBeVisible()
+  await page.getByRole('button', { name: '기본값으로 되돌리기' }).click()
+  await expect(modelSelect).toHaveValue('installed-second.ckpt')
 })
 
 test('keeps the essential workflow usable on a phone-sized viewport', async ({ page }, testInfo) => {
@@ -59,6 +84,7 @@ test('keeps the essential workflow usable on a phone-sized viewport', async ({ p
   await expect(page.locator('.connection-pill__label--mobile')).toHaveText('연결됨')
   const mobileOptions = page.locator('.prompt-options-mobile')
   await expect(mobileOptions.getByLabel('현재 Draw Things 모델')).toHaveValue('mock.ckpt')
+  await expect(mobileOptions.getByLabel('현재 Draw Things 모델').locator('option')).toHaveCount(2)
   await mobileOptions.getByRole('button', { name: '현재 모델 다시 확인' }).click()
   await expect(mobileOptions.getByLabel('현재 Draw Things 모델')).toHaveValue('mock.ckpt')
 
@@ -86,7 +112,7 @@ test('generates and restores a local canvas through the direct HTTP contract', a
   await expect(page.getByRole('button', { name: /API 상태: Draw Things 연결됨/ })).toBeVisible()
 
   const modelSelect = page.locator('.inspector-panel').getByLabel('현재 Draw Things 모델')
-  await expect(modelSelect.locator('option')).toHaveCount(1)
+  await expect(modelSelect.locator('option')).toHaveCount(2)
   await expect(modelSelect).toHaveValue('mock.ckpt')
 
   await page.getByLabel('이미지 프롬프트').fill('보랏빛 숲의 작은 여우')
@@ -102,6 +128,33 @@ test('generates and restores a local canvas through the direct HTTP contract', a
   await expect(page.locator('.canvas-item img')).toBeVisible()
 })
 
+test('can select a locally installed model when Draw Things options has no current model', async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== 'chromium')
+  let requestedModel = ''
+  await mockOptions(page, { model: null, width: 512, height: 512 })
+  await page.route('**/sdapi/v1/txt2img', async (route) => {
+    requestedModel = String((JSON.parse(route.request().postData() ?? '{}') as { model?: unknown }).model ?? '')
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ images: [png], parameters: {}, info: '' }),
+    })
+  })
+
+  await page.goto('/')
+  await expect(page.getByRole('button', { name: /API 상태: Draw Things 연결됨/ })).toBeVisible()
+  await page.getByLabel('이미지 프롬프트').fill('로컬 모델로 첫 생성')
+  await expect(page.getByRole('button', { name: /API 상태/ }).last()).toBeVisible()
+
+  const modelSelect = page.locator('.inspector-panel').getByLabel('현재 Draw Things 모델')
+  await expect(modelSelect.locator('option')).toHaveCount(3)
+  await modelSelect.selectOption('mock.ckpt')
+  await expect(page.getByRole('button', { name: /생성/ })).toBeEnabled()
+  await page.getByRole('button', { name: /생성/ }).click()
+  await expect(page.locator('.canvas-item img')).toBeVisible()
+  expect(requestedModel).toBe('mock.ckpt')
+})
+
 test('pauses options polling while an HTTP generation request is pending', async ({ page }, testInfo) => {
   test.skip(testInfo.project.name !== 'chromium')
   let optionsRequests = 0
@@ -110,6 +163,7 @@ test('pauses options polling while an HTTP generation request is pending', async
   const generationRelease = new Promise<void>((resolve) => { releaseGeneration = resolve })
   const generationStarted = new Promise<void>((resolve) => { markGenerationStarted = resolve })
 
+  await mockModelCatalog(page)
   await page.route('**/sdapi/v1/options', async (route) => {
     optionsRequests += 1
     await route.fulfill({
@@ -194,6 +248,7 @@ test('waits for a manual model refresh before starting generation', async ({ pag
   const optionsStarted = new Promise<void>((resolve) => { markOptionsStarted = resolve })
   let generationRequests = 0
 
+  await mockModelCatalog(page)
   await page.route('**/sdapi/v1/options', async (route) => {
     if (holdNextOptions) {
       holdNextOptions = false
@@ -217,8 +272,10 @@ test('waits for a manual model refresh before starting generation', async ({ pag
 
   await page.goto('/')
   await expect(page.getByRole('button', { name: /API 상태: Draw Things 연결됨/ })).toBeVisible()
+  const refreshButton = page.getByRole('button', { name: '현재 모델 다시 확인' })
+  await expect(refreshButton).toBeEnabled()
   holdNextOptions = true
-  await page.getByRole('button', { name: '현재 모델 다시 확인' }).click()
+  await refreshButton.click()
   await optionsStarted
   await page.getByLabel('이미지 프롬프트').fill('모델 확인 뒤 생성')
   await page.getByRole('button', { name: /생성/ }).click()
@@ -230,6 +287,46 @@ test('waits for a manual model refresh before starting generation', async ({ pag
   }
   await expect(page.locator('.canvas-item img')).toBeVisible()
   expect(generationRequests).toBe(1)
+})
+
+test('continues prompt context across generation and reload but isolates a new session', async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== 'chromium')
+  const generatedPrompts: string[] = []
+  await mockOptions(page, { width: 512, height: 512 })
+  await page.route('**/sdapi/v1/txt2img', async (route) => {
+    const body = JSON.parse(route.request().postData() ?? '{}') as { prompt?: string }
+    generatedPrompts.push(body.prompt ?? '')
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ images: [png], parameters: {}, info: '' }),
+    })
+  })
+
+  await page.goto('/')
+  await expect(page.getByRole('button', { name: /API 상태: Draw Things 연결됨/ })).toBeVisible()
+  await page.getByLabel('이미지 프롬프트').fill('첫 장면')
+  await page.getByRole('button', { name: /생성/ }).click()
+  await expect(page.locator('.canvas-item img')).toHaveCount(1)
+
+  await page.getByLabel('이미지 프롬프트').fill('비를 추가')
+  await page.getByRole('button', { name: /생성/ }).click()
+  await expect(page.locator('.canvas-item img')).toHaveCount(2)
+  expect(generatedPrompts[1]).toBe('첫 장면, 비를 추가')
+
+  await page.waitForTimeout(400)
+  await page.reload()
+  await expect(page.locator('.canvas-item img')).toHaveCount(2)
+  await page.getByLabel('이미지 프롬프트').fill('붉은 우산')
+  await page.getByRole('button', { name: /생성/ }).click()
+  await expect(page.locator('.canvas-item img')).toHaveCount(3)
+  expect(generatedPrompts[2]).toBe('첫 장면, 비를 추가, 붉은 우산')
+
+  await page.getByRole('button', { name: '새 캔버스' }).click()
+  await page.getByLabel('이미지 프롬프트').fill('독립된 사막')
+  await page.getByRole('button', { name: /생성/ }).click()
+  await expect(page.locator('.canvas-item img')).toHaveCount(1)
+  expect(generatedPrompts[3]).toBe('독립된 사막')
 })
 
 test('moves a complete local canvas through a portable JSON backup', async ({ browser }, testInfo) => {

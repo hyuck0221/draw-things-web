@@ -16,7 +16,8 @@ export interface DrawThingsModel {
 export interface ModelCatalogResult {
   ok: boolean
   models: DrawThingsModel[]
-  source: 'http-current' | 'none'
+  source: 'local-metadata' | 'local-and-http-current' | 'http-current' | 'none'
+  currentModel?: string
   checkedAt: number
   stale: boolean
   directoriesScanned: number

@@ -1,4 +1,5 @@
 import react from '@vitejs/plugin-react'
+import { execFile } from 'node:child_process'
 import {
   request as requestHttp,
   type IncomingMessage,
@@ -7,13 +8,20 @@ import {
 import { request as requestHttps } from 'node:https'
 import type { Plugin } from 'vite'
 import { defineConfig } from 'vitest/config'
+import {
+  defaultDrawThingsModelDirectories,
+  listLocalDrawThingsModels,
+  type LocalModelCatalog,
+} from './server/model-catalog'
 
 const MAXIMUM_REQUEST_BYTES = 128 * 1024 * 1024
 const MAXIMUM_OPTIONS_RESPONSE_BYTES = 2 * 1024 * 1024
 const MAXIMUM_GENERATION_RESPONSE_BYTES = 128 * 1024 * 1024
-const MAXIMUM_DIMENSION = 4_096
-const MAXIMUM_OUTPUT_IMAGES = 4
-const MAXIMUM_TOTAL_PIXELS = 4_096 * 4_096
+const MAXIMUM_DIMENSION = 8_192
+const MAXIMUM_BATCH_COUNT = 100
+const MAXIMUM_BATCH_SIZE = 4
+const MAXIMUM_OUTPUT_IMAGES = MAXIMUM_BATCH_COUNT * MAXIMUM_BATCH_SIZE
+const MAXIMUM_TOTAL_PIXELS = 8_192 * 8_192
 const OPTIONS_TIMEOUT_MS = 5_000
 const SECURITY_HEADERS = {
   'content-security-policy': "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; font-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'; worker-src 'self' blob:",
@@ -83,11 +91,52 @@ function sendError(response: ServerResponse, status: number, message: string) {
   response.end(JSON.stringify({ ok: false, message }))
 }
 
+function sendJson(response: ServerResponse, status: number, body: unknown, maximumBytes?: number) {
+  if (!canReply(response)) return
+  const encoded = JSON.stringify(body)
+  if (maximumBytes !== undefined && Buffer.byteLength(encoded) > maximumBytes) {
+    sendError(response, 502, '로컬 모델 목록이 안전한 크기 제한을 초과했습니다.')
+    return
+  }
+  response.writeHead(status, {
+    'cache-control': 'no-store',
+    'content-length': String(Buffer.byteLength(encoded)),
+    'content-type': 'application/json; charset=utf-8',
+    'x-content-type-options': 'nosniff',
+  })
+  response.end(encoded)
+}
+
+function configuredModelDirectories() {
+  return (process.env.DRAW_THINGS_MODEL_DIRECTORIES ?? '')
+    .split(',')
+    .map((value) => value.trim())
+    .filter(Boolean)
+}
+
+function macScreenIsLocked() {
+  if (process.platform !== 'darwin') return Promise.resolve(false)
+  return new Promise<boolean>((resolve) => {
+    execFile('/usr/sbin/ioreg', ['-n', 'Root', '-d1'], {
+      encoding: 'utf8',
+      maxBuffer: 2 * 1024 * 1024,
+      timeout: 1_000,
+    }, (_error, stdout) => {
+      resolve(/"IOConsoleLocked"\s*=\s*Yes/.test(stdout)
+        || /"CGSSessionScreenIsLocked"\s*=\s*Yes/.test(stdout))
+    })
+  })
+}
+
 export function apiRequestKind(rawUrl: string, method: string | undefined) {
   const queryIndex = rawUrl.indexOf('?')
   const pathname = rawUrl.slice(0, queryIndex < 0 ? rawUrl.length : queryIndex)
-  if (!pathname.startsWith('/sdapi')) return 'unrelated' as const
   const normalizedMethod = method?.toUpperCase() ?? ''
+  if (pathname.startsWith('/local-api')) {
+    if (normalizedMethod === 'GET' && pathname === '/local-api/v1/models') return 'models' as const
+    return 'rejected' as const
+  }
+  if (!pathname.startsWith('/sdapi')) return 'unrelated' as const
   if (normalizedMethod === 'GET' && pathname === '/sdapi/v1/options') return 'options' as const
   if (normalizedMethod === 'POST'
     && (pathname === '/sdapi/v1/txt2img' || pathname === '/sdapi/v1/img2img')) {
@@ -231,16 +280,27 @@ function validateGenerationPayload(body: Buffer) {
     return { status: 400, message: '생성 요청 JSON은 객체여야 합니다.' } as const
   }
   const parameters = parsed as Record<string, unknown>
+  const hasOwn = (key: string) => Object.prototype.hasOwnProperty.call(parameters, key)
+  if ((hasOwn('batch_count') && hasOwn('n_iter'))
+    || (hasOwn('upscaler_scale') && hasOwn('upscaler_scale_factor'))) {
+    return { status: 422, message: '같은 생성 설정의 canonical 키와 별칭을 동시에 보낼 수 없습니다.' } as const
+  }
   const width = Number(parameters.width)
   const height = Number(parameters.height)
-  const batchCount = Number(parameters.batch_count ?? 1)
+  const batchCount = Number(parameters.batch_count ?? parameters.n_iter ?? 1)
   const batchSize = Number(parameters.batch_size ?? 1)
+  const upscaler = typeof parameters.upscaler === 'string' ? parameters.upscaler.trim() : ''
+  const upscalerScale = Number(parameters.upscaler_scale ?? parameters.upscaler_scale_factor ?? 0)
+  const outputScale = upscaler && upscalerScale > 1 ? upscalerScale : 1
   const outputImages = batchCount * batchSize
-  const totalPixels = width * height * outputImages
+  const totalPixels = width * height * outputImages * outputScale * outputScale
   if (!Number.isInteger(width) || !Number.isInteger(height)
     || width < 128 || height < 128 || width > MAXIMUM_DIMENSION || height > MAXIMUM_DIMENSION
     || !Number.isInteger(batchCount) || !Number.isInteger(batchSize)
-    || batchCount < 1 || batchSize < 1 || outputImages > MAXIMUM_OUTPUT_IMAGES
+    || batchCount < 1 || batchCount > MAXIMUM_BATCH_COUNT
+    || batchSize < 1 || batchSize > MAXIMUM_BATCH_SIZE
+    || outputImages > MAXIMUM_OUTPUT_IMAGES
+    || (upscaler && (!Number.isInteger(upscalerScale) || upscalerScale < 0 || upscalerScale > 4))
     || !Number.isSafeInteger(totalPixels) || totalPixels > MAXIMUM_TOTAL_PIXELS) {
     return { status: 422, message: '생성 크기 또는 배치가 안전한 작업 한도를 벗어났습니다.' } as const
   }
@@ -256,6 +316,45 @@ export function createDrawThingsApiMiddleware() {
   const allowedHosts = new Set(configuredAllowedHosts())
   let activeGeneration = false
   let activeOptionsRequests = 0
+  let activeModelCatalogRequest: Promise<LocalModelCatalog> | null = null
+  let cachedModelCatalog: LocalModelCatalog | null = null
+
+  const loadModelCatalog = () => {
+    if (activeModelCatalogRequest) return activeModelCatalogRequest
+    const configuredDirectories = configuredModelDirectories()
+    const operation = (async () => {
+      const locked = await macScreenIsLocked()
+      const catalog = locked
+        ? {
+            models: [],
+            directoriesScanned: 0,
+            warnings: ['Mac이 잠겨 있어 설치 모델 폴더를 읽지 못했습니다. 잠금 해제 후 다시 확인하세요.'],
+          }
+        : await (async () => {
+            const directories = configuredDirectories.length
+              ? [...await defaultDrawThingsModelDirectories(), ...configuredDirectories]
+              : undefined
+            return listLocalDrawThingsModels(directories)
+          })()
+      if (catalog.models.length > 0) cachedModelCatalog = catalog
+      if (catalog.models.length === 0 && cachedModelCatalog) {
+        return {
+          ...cachedModelCatalog,
+          warnings: [...new Set([
+            ...catalog.warnings,
+            '현재 모델 폴더를 읽지 못해 마지막으로 확인한 설치 목록을 표시합니다.',
+          ])],
+        }
+      }
+      return catalog
+    })()
+    activeModelCatalogRequest = operation
+    const release = () => {
+      if (activeModelCatalogRequest === operation) activeModelCatalogRequest = null
+    }
+    void operation.then(release, release)
+    return operation
+  }
 
   return (request: IncomingMessage, response: ServerResponse, next: () => void) => {
     const rawUrl = request.url ?? '/'
@@ -282,6 +381,13 @@ export function createDrawThingsApiMiddleware() {
 
     if (requestKind === 'rejected') {
       sendError(response, 404, '지원하지 않는 Draw Things API 경로입니다.')
+      return
+    }
+
+    if (requestKind === 'models') {
+      void loadModelCatalog()
+        .then((catalog) => sendJson(response, 200, catalog, MAXIMUM_OPTIONS_RESPONSE_BYTES))
+        .catch(() => sendError(response, 500, 'Draw Things 로컬 모델 목록을 읽지 못했습니다.'))
       return
     }
 

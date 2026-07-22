@@ -155,14 +155,19 @@ function ParameterControl({
         <select value={String(value ?? '')} disabled={disabled} onChange={(event) => onChange(event.target.value)}>
           {definition.enumValues?.map((option) => <option value={option} key={option}>{option}</option>)}
         </select>
-      ) : (definition.key === 'model' || definition.key === 'refiner_model') && models.length > 0 ? (
-        <select value={String(value ?? '')} disabled={disabled} onChange={(event) => onChange(event.target.value)}>
-          {definition.key === 'refiner_model'
-            ? <option value="">사용 안 함</option>
-            : !value ? <option value="">모델을 선택하세요</option> : null}
-          {value && !models.some((model) => model.file === value) ? <option value={String(value)}>{String(value)}</option> : null}
-          {models.map((model) => <option value={model.file} key={model.file}>{model.name ?? model.file}</option>)}
-        </select>
+      ) : definition.key === 'model' || definition.key === 'refiner_model' ? (
+        <>
+          <TextInput
+            list={`draw-things-${definition.key}-models`}
+            value={String(value ?? '')}
+            disabled={disabled}
+            placeholder={definition.key === 'refiner_model' ? '사용 안 함 또는 파일명 입력' : '체크포인트 파일명 입력'}
+            onChange={(event) => onChange(event.target.value)}
+          />
+          <datalist id={`draw-things-${definition.key}-models`}>
+            {models.map((model) => <option value={model.file} key={model.file}>{model.name ?? model.file}</option>)}
+          </datalist>
+        </>
       ) : numericKind ? (
         <TextInput
           type="number"

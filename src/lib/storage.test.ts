@@ -31,13 +31,13 @@ describe('preference storage migration', () => {
     })
   })
 
-  it('keeps canvas preferences while dropping legacy connector credentials', () => {
+  it('keeps canvas preferences while dropping obsolete connection fields', () => {
     localStorage.setItem(V1_KEY, JSON.stringify({
       version: 1,
       connectionConfigured: true,
       connection: {
-        bridgeUrl: 'http://127.0.0.1:47821',
-        bridgePairingToken: 'legacy-token',
+        obsoleteEndpoint: 'http://127.0.0.1:9999',
+        obsoleteAuthToken: 'legacy-token',
         sharedSecret: 'legacy-secret',
       },
       parameters: { ...DEFAULT_PARAMETERS, width: 768, model: 'kept.ckpt' },
@@ -72,8 +72,8 @@ describe('preference storage migration', () => {
       negativePrompt: '',
       advancedPanelOpen: false,
       compactSidebar: false,
-      connection: { bridgePairingToken: 'must-not-persist' },
-    } as PersistedPreferences & { connection: { bridgePairingToken: string } }
+      obsoleteConnection: { token: 'must-not-persist' },
+    } as PersistedPreferences & { obsoleteConnection: { token: string } }
 
     await savePreferences(preferences)
 
@@ -83,7 +83,7 @@ describe('preference storage migration', () => {
     expect(raw).not.toContain('must-not-persist')
   })
 
-  it('always removes invalid or orphaned legacy connector credentials', () => {
+  it('always removes invalid or orphaned obsolete connection data', () => {
     localStorage.setItem(V1_KEY, '{invalid-json')
     sessionStorage.setItem(SECRET_KEY, 'orphaned-secret')
 
@@ -109,7 +109,7 @@ function validBackup() {
       negativePrompt: 'old negative',
       advancedPanelOpen: true,
       compactSidebar: false,
-      connection: { bridgePairingToken: 'must-be-removed' },
+      obsoleteConnection: { token: 'must-be-removed' },
     },
     sessions: [{
       id: 'session-1',
@@ -155,7 +155,7 @@ describe('portable local backup validation', () => {
     })
     expect(parsed.sessions).toHaveLength(1)
     expect(parsed.images).toHaveLength(1)
-    expect(JSON.stringify(parsed.preferences)).not.toContain('bridgePairingToken')
+    expect(JSON.stringify(parsed.preferences)).not.toContain('obsoleteConnection')
     expect(JSON.stringify(parsed.preferences)).not.toContain('connection')
   })
 

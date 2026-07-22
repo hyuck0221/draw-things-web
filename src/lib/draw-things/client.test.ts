@@ -73,6 +73,34 @@ describe('testConnection', () => {
     })
   })
 
+  it('keeps a model-less but otherwise valid Draw Things API online', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      model: null,
+      width: 512,
+      height: 512,
+      steps: 16,
+    }), { status: 200, headers: { 'content-type': 'application/json' } })))
+
+    await expect(testConnection()).resolves.toMatchObject({
+      ok: true,
+      phase: 'online',
+      capabilities: { canGenerate: true },
+    })
+  })
+
+  it('shows Draw Things validation detail from an error response', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      error: 'Validation Error',
+      detail: 'Model missing.ckpt does not exist',
+    }), { status: 422, headers: { 'content-type': 'application/json' } })))
+
+    await expect(testConnection()).resolves.toMatchObject({
+      ok: false,
+      message: 'Model missing.ckpt does not exist',
+      diagnosticCode: 'http-422',
+    })
+  })
+
   it.each([{}, [], { model: 'fake.ckpt' }])(
     'rejects a generic JSON response that is not a Draw Things options document',
     async (body) => {
@@ -91,27 +119,36 @@ describe('testConnection', () => {
 })
 
 describe('listInstalledModels', () => {
-  it('returns only the current model reported by HTTP options', async () => {
-    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
-      model: 'remote-current.ckpt',
-      width: 512,
-      height: 512,
-      steps: 16,
-    }), {
-      status: 200,
-      headers: { 'content-type': 'application/json' },
-    }))
+  it('merges the current HTTP model with locally installed model metadata', async () => {
+    const fetchMock = vi.fn().mockImplementation((url: string) => Promise.resolve(new Response(
+      url === '/local-api/v1/models'
+        ? JSON.stringify({
+            models: [
+              { file: 'remote-current.ckpt', name: 'Current display name', source: 'local-metadata' },
+              { file: 'other.ckpt', name: 'Other', source: 'local-metadata' },
+            ],
+            directoriesScanned: 1,
+            warnings: [],
+          })
+        : JSON.stringify({ model: 'remote-current.ckpt', width: 512, height: 512, steps: 16 }),
+      { status: 200, headers: { 'content-type': 'application/json' } },
+    )))
     vi.stubGlobal('fetch', fetchMock)
 
     const result = await listInstalledModels('stale-current.ckpt')
 
     expect(result).toMatchObject({
       ok: true,
-      source: 'http-current',
+      source: 'local-and-http-current',
+      currentModel: 'remote-current.ckpt',
       stale: false,
-      models: [{ file: 'remote-current.ckpt', name: 'remote-current.ckpt' }],
+      directoriesScanned: 1,
+      models: [
+        { file: 'remote-current.ckpt', name: 'Current display name' },
+        { file: 'other.ckpt', name: 'Other' },
+      ],
     })
-    expect(result.warnings[0]).toContain('현재 모델만')
+    expect(result.warnings).toEqual([])
   })
 
   it('keeps the local current model as stale fallback while the API is offline', async () => {
@@ -122,6 +159,7 @@ describe('listInstalledModels', () => {
     expect(result).toMatchObject({
       ok: false,
       source: 'http-current',
+      currentModel: 'remembered.ckpt',
       stale: true,
       models: [{ file: 'remembered.ckpt' }],
     })
@@ -208,9 +246,9 @@ describe('generate', () => {
     expect(fetchMock.mock.calls[0]?.[1]?.signal).toBe(controller.signal)
   })
 
-  it('rejects generation responses with too many images', async () => {
+  it('rejects generation responses with more than the official maximum image count', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({
-      images: ['a', 'b', 'c', 'd', 'e'],
+      images: Array.from({ length: 401 }, () => 'a'),
     }), {
       status: 200,
       headers: { 'content-type': 'application/json' },

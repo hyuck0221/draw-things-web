@@ -35,7 +35,7 @@ describe('Draw Things parameter catalog', () => {
 
     expect(isParameterVisible(strength, DEFAULT_PARAMETERS, 'txt2img')).toBe(false)
     expect(isParameterVisible(strength, DEFAULT_PARAMETERS, 'img2img')).toBe(true)
-    expect(parameterMaximum(width)).toBe(4_096)
+    expect(parameterMaximum(width)).toBe(8_192)
     expect(parameterReadOnlyReason(compression)).toContain('422')
   })
 

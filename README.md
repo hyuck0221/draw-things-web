@@ -12,6 +12,8 @@ flowchart LR
     V -->|"HTML / JS / CSS"| A
     A -->|"같은 origin의 /sdapi/*"| V
     V -->|"프록시: 127.0.0.1:7860"| D["Draw Things HTTP API"]
+    A -->|"/local-api/v1/models"| V
+    V -->|"읽기 전용"| M["Draw Things 모델 폴더"]
     A --- L["Local Storage + IndexedDB"]
 ```
 
@@ -26,7 +28,7 @@ Vercel 배포는 UI를 확인하는 정적 preview/안내 페이지입니다. Ve
 - 선택한 캔버스 이미지를 다음 생성의 입력으로 사용하는 변형 흐름
 - 같은 세션의 이전 프롬프트를 이어 붙이는 클라이언트 측 대화 문맥
 - 모델, 샘플러, 크기, 스텝, CFG, 시드, SDXL, refiner, 고해상도 보정, 타일링, LoRA, Control, 업스케일, 텍스트 인코더, TeaCache 등 HTTP API 생성 설정
-- `/sdapi/v1/options`에서 확인한 현재 모델 표시와 새로고침
+- `/sdapi/v1/options`의 현재 모델과 로컬 모델 메타데이터를 합친 설치 모델 드롭다운
 - 5초 간격 연결 감시, 탭 복귀 시 즉시 확인, 생성 직전 재검사
 - 설정은 Local Storage 시작 캐시와 IndexedDB revision 트랜잭션에, 캔버스 세션과 이미지는 IndexedDB에 로컬 저장
 
@@ -64,6 +66,12 @@ DRAW_THINGS_API_ORIGIN=https://127.0.0.1:7861 pnpm dev
 자체 서명 인증서를 쓰는 로컬 HTTPS API라면 신뢰할 인증서를 설치하는 것이 우선입니다. 테스트 목적으로만
 `DRAW_THINGS_API_TLS_VERIFY=false`를 함께 지정할 수 있습니다. 브라우저가 직접 네이티브 gRPC를 호출할
 수는 없으므로 이 단순 서버는 Draw Things의 HTTP 모드만 지원합니다.
+
+기본 sandbox 밖의 모델 폴더도 읽어야 한다면 쉼표로 구분한 절대 경로를 서버 환경에 추가할 수 있습니다.
+
+```sh
+DRAW_THINGS_MODEL_DIRECTORIES="/absolute/Models,/Volumes/Models" pnpm preview
+```
 
 ## Mac에서 실행
 
@@ -137,7 +145,7 @@ pnpm dlx vercel
 pnpm dlx vercel --prod
 ```
 
-`vercel.json`은 `/sdapi` 요청을 `index.html`로 rewrite하지 않습니다. 따라서 Vercel에서 API 요청이 잘못 성공한 것처럼 보이지 않고 명확히 실패합니다.
+`vercel.json`은 `/sdapi`와 `/local-api` 요청을 `index.html`로 rewrite하지 않습니다. 따라서 Vercel에서 API 요청이 잘못 성공한 것처럼 보이지 않고 명확히 실패합니다.
 
 ## 연결 상태 감시
 
@@ -167,9 +175,13 @@ pnpm dlx vercel --prod
 
 ## 모델 목록과 설치
 
-공개 HTTP API의 `/sdapi/v1/options`는 현재 선택된 모델 하나만 반환합니다. 따라서 웹의 모델 선택에는 현재 모델만 표시되며, 전체 설치 모델 카탈로그를 제공하지 않습니다.
+공개 HTTP API의 `/sdapi/v1/options`는 현재 선택된 모델 하나만 반환합니다. Mac에서 실행되는 같은 웹 서버가 Draw Things sandbox의 `Models` 폴더와 공식 `models.json`, `uncurated_models.json`, `custom.json` 메타데이터를 읽어 실제 설치된 **주 모델**만 드롭다운에 합칩니다. VAE·CLIP·T5 같은 보조 체크포인트는 주 모델 목록에서 제외합니다. 이 기능은 별도 상주 프로세스나 인증 절차 없이 `/local-api/v1/models`에서 읽기 전용으로 제공됩니다.
 
-모델을 바꾸거나 새로 설치하려면 Draw Things의 **모델 관리/가져오기**를 사용한 뒤 웹에서 **현재 모델 다시 확인**을 누르십시오. 공개 HTTP API에는 모델 검색, 다운로드, 변환, 설치, 삭제 경로가 없습니다.
+모델 파일명과 refiner 파일명은 전체 설정에서 직접 입력할 수도 있습니다. 새로 설치하려면 Draw Things의 **모델 관리/가져오기**를 사용한 뒤 웹에서 **현재 모델 다시 확인**을 누르십시오. 공개 HTTP API에는 모델 검색, 다운로드, 변환, 설치, 삭제 경로가 없습니다.
+
+Mac이 잠긴 동안에는 macOS 데이터 보호 때문에 다른 프로세스가 Draw Things 모델 폴더를 열지 못할 수
+있습니다. 이때 웹은 대기하지 않고 `/options`의 현재 모델로 폴백하며, Mac 잠금 해제 후 **현재 모델
+다시 확인**을 누르면 전체 설치 목록을 다시 읽습니다.
 
 ## 로컬 데이터
 
@@ -193,13 +205,17 @@ API 상태 창의 **백업 내보내기**와 **백업 가져오기**로 설정·
 
 Mac의 웹 서버는 Draw Things 앞에서 다음을 강제합니다.
 
-- 허용된 Tailscale 클라이언트 또는 Mac 자신만 `/sdapi` 사용
+- 허용된 Tailscale 클라이언트 또는 Mac 자신만 `/sdapi`와 로컬 모델 목록 사용
 - `GET /sdapi/v1/options`, `POST /sdapi/v1/txt2img`, `POST /sdapi/v1/img2img`만 허용
 - 생성 요청 본문 최대 128 MiB, 동시 생성 1건
 - 불완전한 본문 업로드 제한시간, `Expect`/chunked 요청 거부
-- options 응답 최대 2 MiB, 생성 응답 최대 128 MiB
-- 한 요청당 이미지 최대 4개, 총 출력 픽셀 최대 `4096 × 4096`
-- 개별 너비·높이 128–4096
+- options·모델 목록 응답 최대 2 MiB, 생성 응답 최대 128 MiB
+- 공식 범위대로 배치 반복 1–100, 배치 크기 1–4, 한 요청당 최대 400개
+- 개별 너비·높이 128–8192, 한 요청의 총 출력 픽셀 예산 최대 `8192 × 8192`
+
+8192 해상도나 대형 배치는 공식 입력 범위이지만, PNG base64 응답은 Android 브라우저 메모리를 크게
+사용합니다. 모바일에서는 작은 배치부터 올리고, 큰 이미지는 타일 확산·타일 디코딩을 켜서 사용하십시오.
+생성 JSON이 128 MiB를 넘으면 탭 종료를 막기 위해 결과를 거부합니다.
 
 Android의 Tailscale IP가 바뀌면 새 IP로 `DRAW_THINGS_ALLOWED_CLIENTS`를 갱신하고 preview를 다시
 시작해야 합니다. Tailscale ACL/grant에서도 Android만 Mac의 TCP 5173에 접근하도록 제한하면 보호가

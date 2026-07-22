@@ -2552,6 +2552,7 @@ input[type="range"]::-moz-range-thumb {
   line-height: 1.45;
   backdrop-filter: blur(18px);
   animation: toast-in 220ms ease-out;
+  pointer-events: none;
 }
 
 .app-toast > svg {
@@ -2569,6 +2570,7 @@ input[type="range"]::-moz-range-thumb {
 .app-toast .icon-button {
   width: 27px;
   height: 27px;
+  pointer-events: auto;
 }
 
 /* Responsive workspace */

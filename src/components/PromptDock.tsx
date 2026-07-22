@@ -145,6 +145,7 @@ export function PromptDock({
         <div className="prompt-options-mobile">
           <select aria-label="현재 Draw Things 모델" value={model} disabled={models.length === 0} onChange={(event) => onModelChange(event.target.value)}>
             {!model ? <option value="">{modelsLoading ? '현재 모델 확인 중…' : '현재 모델 확인 불가'}</option> : null}
+            {model && !models.some((item) => item.file === model) ? <option value={model}>{model}</option> : null}
             {models.map((item) => <option value={item.file} key={item.file}>{item.name ?? item.file}</option>)}
           </select>
           <IconButton label="현재 모델 다시 확인" disabled={modelsLoading} onClick={onRefreshModels}><RefreshCw className={modelsLoading ? 'spin' : undefined} size={15} /></IconButton>

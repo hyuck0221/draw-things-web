@@ -22,7 +22,7 @@ function number(eventValue: string) {
 }
 
 export function InspectorPanel({ selected, parameters, models, modelsLoading, modelsMessage, onRefreshModels, onChange, onOpenAll, onUseSelected, useSelected }: InspectorPanelProps) {
-  const maximumDimension = 4_096
+  const maximumDimension = 8_192
   return (
     <aside className="inspector-panel">
       <header><span className="eyebrow"><WandSparkles size={13} /> GENERATION</span><h2>생성 설정</h2></header>
@@ -51,7 +51,7 @@ export function InspectorPanel({ selected, parameters, models, modelsLoading, mo
               </IconButton>
             </div>
           </Field>
-          <p className="model-install-note">HTTP API는 전체 설치 목록을 제공하지 않습니다. 모델 선택과 설치는 Draw Things에서 한 뒤 위 새로고침을 누르세요.</p>
+          <p className="model-install-note">로컬 서버가 Draw Things 모델 폴더를 읽어 설치된 주 모델을 표시합니다. 모델 설치 API는 없어 새 모델 설치는 Draw Things 앱에서 진행해야 합니다.</p>
         </section>
 
         <section className="inspector-section">

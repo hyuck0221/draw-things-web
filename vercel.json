@@ -13,6 +13,6 @@
     }
   ],
   "rewrites": [
-    { "source": "/((?!assets|sdapi|.*\\..*).*)", "destination": "/index.html" }
+    { "source": "/((?!assets|sdapi|local-api|.*\\..*).*)", "destination": "/index.html" }
   ]
 }

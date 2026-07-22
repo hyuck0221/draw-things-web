@@ -78,13 +78,13 @@ type RawParameter = readonly [
 
 const RAW_PARAMETERS: readonly RawParameter[] = [
   ['model', [], 'string', null, null, '모델', 'model', 'always'],
-  ['width', [], 'int', 128, 4096, '너비', 'output', 'always', ['step64']],
-  ['height', [], 'int', 128, 4096, '높이', 'output', 'always', ['step64']],
+  ['width', [], 'int', 128, 8192, '너비', 'output', 'always', ['step64']],
+  ['height', [], 'int', 128, 8192, '높이', 'output', 'always', ['step64']],
   ['seed', [], 'int', -1, 4294967295, '시드', 'sampling', 'always', ['minusOneRandom']],
   ['guidance_scale', ['cfg_scale'], 'float', 0, 50, 'CFG 스케일', 'sampling', 'always'],
   ['seed_mode', [], 'enum:seedMode', null, null, '시드 방식', 'sampling', 'advanced'],
   ['steps', [], 'int', 1, 150, '스텝', 'sampling', 'always'],
-  ['batch_count', ['n_iter'], 'int', 1, 4, '배치 반복', 'output', 'always'],
+  ['batch_count', ['n_iter'], 'int', 1, 100, '배치 반복', 'output', 'always'],
   ['batch_size', [], 'int', 1, 4, '배치 크기', 'output', 'always'],
   ['sampler', ['sampler_name', 'sampler_index'], 'enum:sampler', null, null, '샘플러', 'sampling', 'always'],
   ['strength', ['denoising_strength'], 'float', 0, 1, '디노이즈 강도', 'img2img', 'route=img2img'],
@@ -242,6 +242,8 @@ export function sanitizeHttpParameters(parameters: GenerationParameters) {
   for (const [key, value] of Object.entries(parameters)) {
     if (HTTP_UNWRITABLE.has(key)) continue
     if (key === 'tea_cache_end' && Number(value) < 0) continue
+    if ((key === 'model' || key === 'refiner_model')
+      && typeof value === 'string' && !value.trim()) continue
     // Draw Things interprets an explicitly empty upscaler name as an enabled
     // 4x upscaler and returns a black/neon image. An omitted field correctly
     // keeps upscaling disabled.

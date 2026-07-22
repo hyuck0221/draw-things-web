@@ -15,6 +15,8 @@ describe('Draw Things API route guard', () => {
     expect(apiRequestKind('/sdapi/v1/options?fresh=1', 'GET')).toBe('options')
     expect(apiRequestKind('/sdapi/v1/txt2img', 'POST')).toBe('generation')
     expect(apiRequestKind('/sdapi/v1/img2img', 'POST')).toBe('generation')
+    expect(apiRequestKind('/local-api/v1/models', 'GET')).toBe('models')
+    expect(apiRequestKind('/local-api/v1/models', 'POST')).toBe('rejected')
     expect(apiRequestKind('/sdapi/v1/options', 'DELETE')).toBe('rejected')
     expect(apiRequestKind('/sdapi/v1/sd-models', 'GET')).toBe('rejected')
   })
@@ -52,6 +54,21 @@ describe('Draw Things API route guard', () => {
   it('passes IPv6 upstream literals to Node without URL brackets', () => {
     expect(upstreamHostname(new URL('http://[::1]:7860'))).toBe('::1')
     expect(upstreamHostname(new URL('http://127.0.0.1:7860'))).toBe('127.0.0.1')
+  })
+
+  it('accepts arbitrary HTTP and HTTPS upstream ports but rejects non-HTTP protocols', () => {
+    const previous = process.env.DRAW_THINGS_API_ORIGIN
+    try {
+      for (const origin of ['http://127.0.0.1:9000', 'https://draw-things.internal:9443']) {
+        process.env.DRAW_THINGS_API_ORIGIN = origin
+        expect(() => createDrawThingsApiMiddleware()).not.toThrow()
+      }
+      process.env.DRAW_THINGS_API_ORIGIN = 'ftp://127.0.0.1:7860'
+      expect(() => createDrawThingsApiMiddleware()).toThrow(/HTTP\(S\)/)
+    } finally {
+      if (previous === undefined) delete process.env.DRAW_THINGS_API_ORIGIN
+      else process.env.DRAW_THINGS_API_ORIGIN = previous
+    }
   })
 })
 
@@ -167,6 +184,12 @@ describe.sequential('Draw Things API gateway sockets', () => {
   })
 
   it('rejects Expect and releases a partial upload after its deadline', async () => {
+    await expect(requestStatus(gatewayPort, '/local-api/v1/models', undefined, {
+      host: `localhost:${gatewayPort}`,
+    })).resolves.toBe(200)
+    await expect(requestStatus(gatewayPort, '/local-api/v1/models', undefined, {
+      host: 'rebind.example',
+    })).resolves.toBe(403)
     await expect(requestStatus(gatewayPort, '/sdapi/v1/options', undefined, {
       host: `localhost:${gatewayPort}`,
     })).resolves.toBe(200)
@@ -242,5 +265,59 @@ describe.sequential('Draw Things API gateway sockets', () => {
       'content-length': Buffer.byteLength(nextBody),
     })).resolves.toBe(200)
     expect(upstreamMaximum).toBe(1)
+  })
+
+  it('accepts official dimension and batch maxima within the pixel budget and counts upscaling', async () => {
+    const maximumDimensionBody = JSON.stringify({
+      prompt: 'maximum dimension',
+      width: 8_192,
+      height: 8_192,
+      batch_count: 1,
+      batch_size: 1,
+    })
+    await expect(requestStatus(gatewayPort, '/sdapi/v1/txt2img', maximumDimensionBody, {
+      'content-type': 'application/json',
+      'content-length': Buffer.byteLength(maximumDimensionBody),
+    })).resolves.toBe(200)
+
+    const maximumBatchBody = JSON.stringify({
+      prompt: 'maximum batch',
+      width: 128,
+      height: 128,
+      batch_count: 100,
+      batch_size: 4,
+    })
+    await expect(requestStatus(gatewayPort, '/sdapi/v1/txt2img', maximumBatchBody, {
+      'content-type': 'application/json',
+      'content-length': Buffer.byteLength(maximumBatchBody),
+    })).resolves.toBe(200)
+
+    const oversizedUpscaleBody = JSON.stringify({
+      prompt: 'oversized upscale',
+      width: 8_192,
+      height: 8_192,
+      batch_count: 1,
+      batch_size: 1,
+      upscaler: 'realesrgan_x4plus_f16.ckpt',
+      upscaler_scale: 4,
+    })
+    await expect(requestStatus(gatewayPort, '/sdapi/v1/txt2img', oversizedUpscaleBody, {
+      'content-type': 'application/json',
+      'content-length': Buffer.byteLength(oversizedUpscaleBody),
+    })).resolves.toBe(422)
+
+    const oversizedAliasUpscaleBody = JSON.stringify({
+      prompt: 'oversized alias upscale',
+      width: 8_192,
+      height: 8_192,
+      batch_size: 1,
+      n_iter: 1,
+      upscaler: 'realesrgan_x4plus_f16.ckpt',
+      upscaler_scale_factor: 4,
+    })
+    await expect(requestStatus(gatewayPort, '/sdapi/v1/txt2img', oversizedAliasUpscaleBody, {
+      'content-type': 'application/json',
+      'content-length': Buffer.byteLength(oversizedAliasUpscaleBody),
+    })).resolves.toBe(422)
   })
 })
