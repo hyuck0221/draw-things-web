@@ -1,30 +1,10 @@
 import type {
-  ConnectionConfig,
   GenerationParameters,
   PersistedPreferences,
   ServerCapabilities,
   WorkspaceSession,
 } from '../domain/types'
-import { randomHex, randomUuid } from './ids'
-
-export const DEFAULT_CONNECTION: ConnectionConfig = {
-  transport: 'bridge',
-  protocol: 'http',
-  host: '127.0.0.1',
-  port: 7859,
-  tls: false,
-  apiBasePath: '',
-  sharedSecret: '',
-  rememberSecret: false,
-  clientName: 'Draw Things Local Canvas',
-  bridgeUrl: 'http://127.0.0.1:47821',
-  bridgePairingToken: '',
-  allowSelfSignedCertificate: true,
-  tlsFingerprintSha256: '',
-  expectedBridgeMode: false,
-  expectedResponseCompression: true,
-  expectedModelBrowsing: false,
-}
+import { randomUuid } from './ids'
 
 export const DEFAULT_PARAMETERS: GenerationParameters = {
   model: '',
@@ -73,7 +53,6 @@ export const DEFAULT_PARAMETERS: GenerationParameters = {
   guiding_frame_noise: 0.02,
   start_frame_guidance: 1,
   shift: 1,
-  stage_2_steps: 10,
   stage_2_guidance: 1,
   stage_2_shift: 1,
   loras: [],
@@ -110,18 +89,14 @@ export const DEFAULT_PARAMETERS: GenerationParameters = {
   color_calibration: 'none',
   expand_prompt_to_json: false,
   restore_faces: false,
-  face_restoration: '',
 }
 
 export const EMPTY_CAPABILITIES: ServerCapabilities = {
-  protocol: 'http',
   canGenerate: false,
   canImageToImage: false,
   canStreamProgress: false,
   canCancel: false,
   canBrowseModels: false,
-  requiresHttpModeForCanvas: false,
-  sharedSecretRequired: false,
   models: [],
   loras: [],
   controls: [],
@@ -130,17 +105,11 @@ export const EMPTY_CAPABILITIES: ServerCapabilities = {
 }
 
 export const DEFAULT_PREFERENCES: PersistedPreferences = {
-  version: 1,
-  connectionConfigured: false,
-  connection: DEFAULT_CONNECTION,
+  version: 2,
   parameters: DEFAULT_PARAMETERS,
   negativePrompt: '',
   advancedPanelOpen: false,
   compactSidebar: false,
-}
-
-export function createPairingToken() {
-  return randomHex(32)
 }
 
 export function createSession(title = '새 캔버스'): WorkspaceSession {

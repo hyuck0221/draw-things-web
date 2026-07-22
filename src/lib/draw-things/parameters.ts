@@ -1,4 +1,4 @@
-import type { ApiProtocol, GenerationMode, GenerationParameters, ParameterValue } from '../../domain/types'
+import type { GenerationMode, GenerationParameters, ParameterValue } from '../../domain/types'
 
 export type ParameterKind = 'string' | 'int' | 'float' | 'bool' | 'enum' | 'loras' | 'controls'
 
@@ -14,8 +14,6 @@ export interface ParameterDefinition {
   enumValues?: readonly string[]
   step?: number
   readOnlyReason?: string
-  readOnlyProtocol?: ApiProtocol
-  protocols?: readonly ApiProtocol[]
   sourceNote?: string
 }
 
@@ -80,13 +78,13 @@ type RawParameter = readonly [
 
 const RAW_PARAMETERS: readonly RawParameter[] = [
   ['model', [], 'string', null, null, '모델', 'model', 'always'],
-  ['width', [], 'int', 128, 8192, '너비', 'output', 'always', ['step64']],
-  ['height', [], 'int', 128, 8192, '높이', 'output', 'always', ['step64']],
+  ['width', [], 'int', 128, 4096, '너비', 'output', 'always', ['step64']],
+  ['height', [], 'int', 128, 4096, '높이', 'output', 'always', ['step64']],
   ['seed', [], 'int', -1, 4294967295, '시드', 'sampling', 'always', ['minusOneRandom']],
   ['guidance_scale', ['cfg_scale'], 'float', 0, 50, 'CFG 스케일', 'sampling', 'always'],
   ['seed_mode', [], 'enum:seedMode', null, null, '시드 방식', 'sampling', 'advanced'],
   ['steps', [], 'int', 1, 150, '스텝', 'sampling', 'always'],
-  ['batch_count', ['n_iter'], 'int', 1, 100, '배치 반복', 'output', 'always'],
+  ['batch_count', ['n_iter'], 'int', 1, 4, '배치 반복', 'output', 'always'],
   ['batch_size', [], 'int', 1, 4, '배치 크기', 'output', 'always'],
   ['sampler', ['sampler_name', 'sampler_index'], 'enum:sampler', null, null, '샘플러', 'sampling', 'always'],
   ['strength', ['denoising_strength'], 'float', 0, 1, '디노이즈 강도', 'img2img', 'route=img2img'],
@@ -127,7 +125,6 @@ const RAW_PARAMETERS: readonly RawParameter[] = [
   ['guiding_frame_noise', [], 'float', 0, 1, '가이드 프레임 노이즈', 'video', 'cap=video'],
   ['start_frame_guidance', [], 'float', 0, 25, '시작 프레임 가이던스', 'video', 'cap=video'],
   ['shift', [], 'float', 0.1, 8, '시프트', 'sampling', 'advanced'],
-  ['stage_2_steps', [], 'int', 1, 1000, '2단계 스텝', 'stage2', 'cap=stage2', ['grpcOnly']],
   ['stage_2_guidance', [], 'float', 0, 25, '2단계 CFG', 'stage2', 'cap=stage2'],
   ['stage_2_shift', [], 'float', 0.1, 5, '2단계 시프트', 'stage2', 'cap=stage2'],
   ['loras', [], 'loras', null, null, 'LoRA', 'conditioning', 'always'],
@@ -164,7 +161,6 @@ const RAW_PARAMETERS: readonly RawParameter[] = [
   ['color_calibration', ['color_calibration'], 'enum:color', null, null, '색상 보정', 'postprocess', 'advanced', ['httpBroken']],
   ['expand_prompt_to_json', ['expand_prompt_to_json'], 'bool', null, null, '프롬프트를 JSON으로 확장', 'prompt', 'advanced', ['httpBroken']],
   ['restore_faces', [], 'bool', null, null, '얼굴 복원', 'postprocess', 'always', ['specialHttp', 'httpOnly']],
-  ['face_restoration', [], 'string', null, null, '얼굴 복원 모델', 'postprocess', 'advanced', ['grpcOnly']],
 ] as const
 
 function kindAndEnum(rawKind: string): Pick<ParameterDefinition, 'kind' | 'enumValues'> {
@@ -187,18 +183,12 @@ export const PARAMETER_DEFINITIONS: ParameterDefinition[] = RAW_PARAMETERS.map(
     readOnlyReason: flags.includes('httpBroken')
       ? 'Draw Things 1.20260716.0의 중복 JSON 별칭 버그로 HTTP 요청 시 422가 발생해 현재 읽기 전용입니다.'
       : undefined,
-    readOnlyProtocol: flags.includes('httpBroken') ? 'http' : undefined,
-    protocols: flags.includes('grpcOnly')
-      ? ['grpc']
-      : flags.includes('httpOnly') ? ['http'] : undefined,
     sourceNote: flags.includes('upstreamDefaultBug')
       ? '현재 앱 소스에서 기본값 참조가 잘못되어 연결 후 서버 값을 우선 사용합니다.'
       : flags.includes('minusOneOmit')
         ? '앱 기본값 -1은 HTTP 검증 범위 밖이므로 -1일 때 요청에서 생략합니다.'
         : flags.includes('specialHttp')
           ? 'HTTP API 전용 필드이며 활성화하면 앱에 설치된 첫 얼굴 복원 모델을 사용합니다.'
-          : flags.includes('grpcOnly')
-            ? 'Draw Things gRPC GenerationConfiguration 전용 필드입니다.'
           : undefined,
   }),
 )
@@ -207,9 +197,7 @@ export function isParameterVisible(
   definition: ParameterDefinition,
   values: GenerationParameters,
   mode: GenerationMode,
-  protocol: ApiProtocol = 'http',
 ) {
-  if (definition.protocols && !definition.protocols.includes(protocol)) return false
   const { when } = definition
   if (when === 'composer') return false
   if (when === 'route=img2img' || when === 'route=inpaint') return mode === 'img2img'
@@ -241,27 +229,11 @@ const HTTP_UNWRITABLE = new Set([
   'face_restoration',
 ])
 
-export function parameterReadOnlyReason(definition: ParameterDefinition, protocol: ApiProtocol) {
-  return !definition.readOnlyProtocol || definition.readOnlyProtocol === protocol
-    ? definition.readOnlyReason
-    : undefined
+export function parameterReadOnlyReason(definition: ParameterDefinition) {
+  return definition.readOnlyReason
 }
 
-const GRPC_DIMENSION_LIMIT_KEYS = new Set([
-  'width',
-  'height',
-  'original_width',
-  'original_height',
-  'target_width',
-  'target_height',
-  'negative_original_width',
-  'negative_original_height',
-])
-
-export function parameterMaximum(definition: ParameterDefinition, protocol: ApiProtocol) {
-  if (protocol === 'grpc' && GRPC_DIMENSION_LIMIT_KEYS.has(definition.key)) {
-    return Math.min(definition.max ?? 4_096, 4_096)
-  }
+export function parameterMaximum(definition: ParameterDefinition) {
   return definition.max
 }
 

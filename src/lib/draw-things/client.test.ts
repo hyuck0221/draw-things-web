@@ -1,22 +1,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { DEFAULT_CONNECTION } from '../defaults'
-import { discoverEndpoints, drawThingsBaseUrl, generate, listInstalledModels, normalizeGeneratedImage, testConnection } from './client'
+import {
+  generate,
+  listInstalledModels,
+  normalizeGeneratedImage,
+  testConnection,
+} from './client'
 
 afterEach(() => vi.unstubAllGlobals())
-
-describe('drawThingsBaseUrl', () => {
-  it('formats IPv4 and a base path', () => {
-    expect(
-      drawThingsBaseUrl({ ...DEFAULT_CONNECTION, host: '127.0.0.1', apiBasePath: '/api/' }),
-    ).toBe('http://127.0.0.1:7859/api')
-  })
-
-  it('wraps raw IPv6 hosts in brackets', () => {
-    expect(drawThingsBaseUrl({ ...DEFAULT_CONNECTION, host: '::1', tls: true })).toBe(
-      'https://[::1]:7859',
-    )
-  })
-})
 
 describe('normalizeGeneratedImage', () => {
   it('keeps data URLs and wraps bare base64', () => {
@@ -31,144 +21,178 @@ describe('normalizeGeneratedImage', () => {
   })
 })
 
-describe('discoverEndpoints', () => {
-  it('forwards the configured loopback identity and gRPC credentials', async () => {
-    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ endpoints: [] }), {
-      status: 200,
-      headers: { 'content-type': 'application/json' },
-    }))
-    vi.stubGlobal('fetch', fetchMock)
-    const connection = {
-      ...DEFAULT_CONNECTION,
-      protocol: 'grpc' as const,
-      host: '::1',
-      sharedSecret: 'draw-things-secret',
-      clientName: 'Canvas test',
-      tlsFingerprintSha256: 'AA:BB',
-      bridgePairingToken: 'bridge-token',
-    }
-
-    await discoverEndpoints(connection)
-
-    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit]
-    expect(url).toBe('http://127.0.0.1:47821/v1/discover')
-    expect(init.headers).toMatchObject({ 'x-draw-things-pairing-token': 'bridge-token' })
-    expect(JSON.parse(String(init.body))).toMatchObject({
-      host: '::1',
-      ports: [7859, 7860],
-      sharedSecret: 'draw-things-secret',
-      clientName: 'Canvas test',
-      tlsFingerprintSha256: 'AA:BB',
-    })
-  })
-})
-
-describe('listInstalledModels', () => {
-  it('refreshes the current model from direct HTTP options', async () => {
-    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ model: 'remote-current.ckpt' }), {
-      status: 200,
-      headers: { 'content-type': 'application/json' },
-    }))
-    vi.stubGlobal('fetch', fetchMock)
-
-    const result = await listInstalledModels(
-      { ...DEFAULT_CONNECTION, transport: 'direct' },
-      'stale-current.ckpt',
-    )
-
-    expect(result).toMatchObject({
-      ok: true,
-      source: 'http-current',
-      models: [{ file: 'remote-current.ckpt' }],
-    })
-  })
-
-  it('uses the pairing token when requesting the connector catalog', async () => {
+describe('testConnection', () => {
+  it('tests the same-origin Draw Things options endpoint', async () => {
     const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
-      ok: true,
-      models: [{ file: 'local.ckpt', name: 'Local' }],
-      source: 'local-metadata',
-      checkedAt: 1,
-      stale: false,
-      directoriesScanned: 1,
-      warnings: [],
+      model: 'current.ckpt',
+      width: 512,
+      height: 512,
+      steps: 16,
     }), {
       status: 200,
       headers: { 'content-type': 'application/json' },
     }))
     vi.stubGlobal('fetch', fetchMock)
 
-    const result = await listInstalledModels({
-      ...DEFAULT_CONNECTION,
-      bridgeUrl: 'http://100.121.194.59:47821',
-      bridgePairingToken: 'bridge-token',
-    }, 'current.ckpt', ['detail_lora.ckpt'])
+    const result = await testConnection()
 
-    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit]
-    expect(url).toBe('http://100.121.194.59:47821/v1/models')
-    expect(init.headers).toMatchObject({ 'x-draw-things-pairing-token': 'bridge-token' })
-    expect(JSON.parse(String(init.body))).toMatchObject({
-      currentModel: 'current.ckpt',
-      selectedLoRAs: ['detail_lora.ckpt'],
-    })
-    expect((init as RequestInit & { targetAddressSpace?: string }).targetAddressSpace).toBe('local')
-    expect(result.models).toEqual([expect.objectContaining({ file: 'local.ckpt' })])
-  })
-})
-
-describe('testConnection local-network diagnostics', () => {
-  it('reports a denied Android/Chrome local-network permission explicitly', async () => {
-    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new TypeError('Failed to fetch')))
-    vi.stubGlobal('navigator', {
-      permissions: { query: vi.fn().mockResolvedValue({ state: 'denied' }) },
-    })
-
-    const result = await testConnection({
-      ...DEFAULT_CONNECTION,
-      bridgeUrl: 'https://mac.example-tailnet.ts.net:47822',
-      bridgePairingToken: 'bridge-token',
-    })
-
+    expect(fetchMock).toHaveBeenCalledWith('/sdapi/v1/options', expect.objectContaining({
+      signal: expect.any(AbortSignal),
+    }))
     expect(result).toMatchObject({
-      ok: false,
-      phase: 'permission-denied',
-      diagnosticCode: 'local-network-permission-denied',
+      ok: true,
+      phase: 'online',
+      endpoint: '/sdapi/v1/options',
+      remoteOptions: { model: 'current.ckpt', steps: 16 },
     })
-    expect(result.message).toContain('Android Chrome')
   })
 
-  it('preserves an authenticated connector HTTP error even when the permission is denied', async () => {
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(
-      JSON.stringify({ message: 'A valid bridge pairing token is required.' }),
-      { status: 401, headers: { 'content-type': 'application/json' } },
-    )))
-    vi.stubGlobal('navigator', {
-      permissions: { query: vi.fn().mockResolvedValue({ state: 'denied' }) },
-    })
+  it('reports an API mismatch for an HTTP error', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('{}', {
+      status: 404,
+      headers: { 'content-type': 'application/json' },
+    })))
 
-    const result = await testConnection({
-      ...DEFAULT_CONNECTION,
-      bridgeUrl: 'https://mac.example-tailnet.ts.net:47822',
-      bridgePairingToken: 'wrong-token',
-    })
-
-    expect(result).toMatchObject({
+    await expect(testConnection()).resolves.toMatchObject({
       ok: false,
       phase: 'api-mismatch',
-      diagnosticCode: 'http-401',
-      message: 'A valid bridge pairing token is required.',
+      diagnosticCode: 'http-404',
+    })
+  })
+
+  it('reports upstream 5xx failures as offline rather than an API mismatch', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('{}', {
+      status: 503,
+      headers: { 'content-type': 'application/json' },
+    })))
+
+    await expect(testConnection()).resolves.toMatchObject({
+      ok: false,
+      phase: 'offline',
+      diagnosticCode: 'http-503',
+    })
+  })
+
+  it.each([{}, [], { model: 'fake.ckpt' }])(
+    'rejects a generic JSON response that is not a Draw Things options document',
+    async (body) => {
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify(body), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      })))
+
+      await expect(testConnection()).resolves.toMatchObject({
+        ok: false,
+        phase: 'api-mismatch',
+        diagnosticCode: 'invalid-response',
+      })
+    },
+  )
+})
+
+describe('listInstalledModels', () => {
+  it('returns only the current model reported by HTTP options', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      model: 'remote-current.ckpt',
+      width: 512,
+      height: 512,
+      steps: 16,
+    }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const result = await listInstalledModels('stale-current.ckpt')
+
+    expect(result).toMatchObject({
+      ok: true,
+      source: 'http-current',
+      stale: false,
+      models: [{ file: 'remote-current.ckpt', name: 'remote-current.ckpt' }],
+    })
+    expect(result.warnings[0]).toContain('현재 모델만')
+  })
+
+  it('keeps the local current model as stale fallback while the API is offline', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new TypeError('Failed to fetch')))
+
+    const result = await listInstalledModels('remembered.ckpt')
+
+    expect(result).toMatchObject({
+      ok: false,
+      source: 'http-current',
+      stale: true,
+      models: [{ file: 'remembered.ckpt' }],
     })
   })
 })
 
 describe('generate', () => {
-  it('aborts a direct HTTP generation when the caller cancels it', async () => {
+  it('posts txt2img to the same origin and omits a blank upscaler', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      images: ['abc'],
+    }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    }))
+    vi.stubGlobal('fetch', fetchMock)
+    const stream = generate({
+      id: 'same-origin-test',
+      mode: 'txt2img',
+      prompt: 'a lighthouse',
+      negativePrompt: 'blurry',
+      parameters: { width: 512, upscaler: '   ', upscaler_scale: 0 },
+    })
+
+    await expect(stream.next()).resolves.toMatchObject({ value: { type: 'accepted' }, done: false })
+    await expect(stream.next()).resolves.toMatchObject({
+      value: { type: 'result', images: ['data:image/png;base64,abc'] },
+      done: false,
+    })
+
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+    expect(url).toBe('/sdapi/v1/txt2img')
+    expect(init.method).toBe('POST')
+    expect(init.headers).toEqual({ 'content-type': 'application/json' })
+    expect(JSON.parse(String(init.body))).toEqual({
+      width: 512,
+      upscaler_scale: 0,
+      prompt: 'a lighthouse',
+      negative_prompt: 'blurry',
+    })
+  })
+
+  it('posts a stripped img2img source to the relative endpoint', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ images: ['aGVsbG8='] }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    }))
+    vi.stubGlobal('fetch', fetchMock)
+    const stream = generate({
+      id: 'img2img-test',
+      mode: 'img2img',
+      prompt: 'variation',
+      negativePrompt: '',
+      parameters: {},
+      initImage: 'data:image/png;base64,aGVsbG8=',
+    })
+
+    await stream.next()
+    await stream.next()
+
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+    expect(url).toBe('/sdapi/v1/img2img')
+    expect(JSON.parse(String(init.body))).toMatchObject({ init_images: ['aGVsbG8='] })
+  })
+
+  it('aborts an HTTP generation when the caller cancels it', async () => {
     const fetchMock = vi.fn((_url: string, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
       init?.signal?.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')), { once: true })
     }))
     vi.stubGlobal('fetch', fetchMock)
     const controller = new AbortController()
-    const stream = generate({ ...DEFAULT_CONNECTION, transport: 'direct' }, {
+    const stream = generate({
       id: 'cancel-test',
       mode: 'txt2img',
       prompt: 'test',
@@ -182,5 +206,44 @@ describe('generate', () => {
 
     await expect(result).rejects.toMatchObject({ name: 'AbortError' })
     expect(fetchMock.mock.calls[0]?.[1]?.signal).toBe(controller.signal)
+  })
+
+  it('rejects generation responses with too many images', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      images: ['a', 'b', 'c', 'd', 'e'],
+    }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    })))
+    const stream = generate({
+      id: 'too-many-images',
+      mode: 'txt2img',
+      prompt: 'test',
+      negativePrompt: '',
+      parameters: {},
+    })
+
+    await stream.next()
+    await expect(stream.next()).rejects.toMatchObject({ code: 'invalid-generation-response' })
+  })
+
+  it('rejects a declared generation response above the byte limit before reading it', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('{}', {
+      status: 200,
+      headers: {
+        'content-type': 'application/json',
+        'content-length': String(128 * 1024 * 1024 + 1),
+      },
+    })))
+    const stream = generate({
+      id: 'oversized-response',
+      mode: 'txt2img',
+      prompt: 'test',
+      negativePrompt: '',
+      parameters: {},
+    })
+
+    await stream.next()
+    await expect(stream.next()).rejects.toMatchObject({ code: 'response-too-large' })
   })
 })

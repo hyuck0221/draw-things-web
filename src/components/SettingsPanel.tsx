@@ -10,7 +10,6 @@ import {
 } from 'lucide-react'
 import { useMemo, useState } from 'react'
 import type {
-  ApiProtocol,
   DrawThingsModel,
   GenerationMode,
   GenerationParameters,
@@ -32,7 +31,6 @@ import { Button, Field, IconButton, TextInput, Toggle } from './ui'
 
 interface SettingsPanelProps {
   open: boolean
-  protocol: ApiProtocol
   mode: GenerationMode
   values: GenerationParameters
   models: DrawThingsModel[]
@@ -119,19 +117,17 @@ function ControlEditor({
 
 function ParameterControl({
   definition,
-  protocol,
   value,
   models,
   onChange,
 }: {
   definition: ParameterDefinition
-  protocol: ApiProtocol
   value: ParameterValue | undefined
   models: DrawThingsModel[]
   onChange: (value: ParameterValue) => void
 }) {
-  const readOnlyReason = parameterReadOnlyReason(definition, protocol)
-  const maximum = parameterMaximum(definition, protocol)
+  const readOnlyReason = parameterReadOnlyReason(definition)
+  const maximum = parameterMaximum(definition)
   const disabled = Boolean(readOnlyReason)
   const numericKind = definition.kind === 'int' || definition.kind === 'float'
     ? definition.kind
@@ -184,13 +180,13 @@ function ParameterControl({
   )
 }
 
-export function SettingsPanel({ open, protocol, mode, values, models, onChange, onClose, onReset }: SettingsPanelProps) {
+export function SettingsPanel({ open, mode, values, models, onChange, onClose, onReset }: SettingsPanelProps) {
   const [query, setQuery] = useState('')
   const groups = useMemo(() => {
     const normalizeSearch = (value: string) => value.toLocaleLowerCase().replace(/[\s_-]+/g, '')
     const normalized = normalizeSearch(query.trim())
     const matching = PARAMETER_DEFINITIONS.filter((definition) => {
-      if (!isParameterVisible(definition, values, mode, protocol)) return false
+      if (!isParameterVisible(definition, values, mode)) return false
       if (!normalized) return true
       return normalizeSearch(`${definition.label} ${definition.key} ${definition.aliases.join(' ')}`).includes(normalized)
     })
@@ -198,13 +194,13 @@ export function SettingsPanel({ open, protocol, mode, values, models, onChange, 
       ;(result[definition.group] ??= []).push(definition)
       return result
     }, {})
-  }, [mode, protocol, query, values])
+  }, [mode, query, values])
 
   if (!open) return null
   return (
     <aside className="settings-panel" aria-label="전체 생성 설정">
       <header>
-        <div><span className="eyebrow"><SlidersHorizontal size={13} /> API PARAMETERS</span><h2>전체 생성 설정</h2><p>{protocol === 'grpc' ? 'Draw Things gRPC 생성 구성을 표시합니다. HTTP에서 막힌 옵션도 gRPC에서는 제어할 수 있습니다.' : 'Draw Things HTTP 생성 항목을 표시합니다. upstream 호환성 문제가 있는 값은 읽기 전용입니다.'}</p></div>
+        <div><span className="eyebrow"><SlidersHorizontal size={13} /> API PARAMETERS</span><h2>전체 생성 설정</h2><p>Draw Things HTTP 생성 항목을 표시합니다. upstream 호환성 문제가 있는 값은 읽기 전용입니다.</p></div>
         <IconButton label="설정 닫기" onClick={onClose}><X size={18} /></IconButton>
       </header>
       <div className="settings-search"><Search size={16} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="설정 이름 또는 API 키 검색" /></div>
@@ -220,8 +216,8 @@ export function SettingsPanel({ open, protocol, mode, values, models, onChange, 
               <div className="settings-group__body">
                 {definitions.map((definition) => (
                   <div className="parameter-control" key={definition.key}>
-                    {parameterReadOnlyReason(definition, protocol) ? <span className="source-warning" title={parameterReadOnlyReason(definition, protocol)}><AlertTriangle size={13} /></span> : definition.sourceNote ? <span className="source-note" title={definition.sourceNote}><CircleHelp size={13} /></span> : null}
-                    <ParameterControl definition={definition} protocol={protocol} value={values[definition.key]} models={models} onChange={(value) => onChange(definition.key, value)} />
+                    {parameterReadOnlyReason(definition) ? <span className="source-warning" title={parameterReadOnlyReason(definition)}><AlertTriangle size={13} /></span> : definition.sourceNote ? <span className="source-note" title={definition.sourceNote}><CircleHelp size={13} /></span> : null}
+                    <ParameterControl definition={definition} value={values[definition.key]} models={models} onChange={(value) => onChange(definition.key, value)} />
                   </div>
                 ))}
               </div>

@@ -168,7 +168,9 @@ export function InfiniteCanvas({
                 onViewChange({ zoom, x: viewport.clientWidth / 2 - (item.x + item.width / 2) * zoom, y: viewport.clientHeight / 2 - (item.y + item.height / 2) * zoom })
               }}
             >
-              <img src={item.dataUrl} alt={item.prompt || '캔버스 이미지'} draggable={false} />
+              {item.dataUrl
+                ? <img src={item.dataUrl} alt={item.prompt || '캔버스 이미지'} draggable={false} />
+                : null}
               <span className="canvas-item__meta"><span>{item.kind === 'generated' ? <Sparkles size={12} /> : <ImagePlus size={12} />}{item.kind === 'generated' ? 'Generated' : 'Imported'}</span>{item.seed !== undefined ? <span>Seed {item.seed}</span> : null}</span>
             </button>
           ))}

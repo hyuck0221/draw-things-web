@@ -30,7 +30,7 @@ export function ConversationPanel({
                 <header><strong>{turn.role === 'user' ? '나' : 'Draw Things'}</strong><time>{new Intl.DateTimeFormat('ko', { hour: '2-digit', minute: '2-digit' }).format(turn.createdAt)}</time></header>
                 <p>{turn.content}</p>
                 {turn.effectivePrompt && turn.effectivePrompt !== turn.content ? <details><summary><Link2 size={12} /> 이어진 실제 프롬프트</summary><code>{turn.effectivePrompt}</code></details> : null}
-                {images.length ? <div className="conversation-images">{images.map((image) => image ? <img src={image.dataUrl} alt="생성 결과" key={image.id} /> : null)}</div> : null}
+                {images.length ? <div className="conversation-images">{images.map((image) => image?.dataUrl ? <img src={image.dataUrl} alt="생성 결과" key={image.id} /> : null)}</div> : null}
                 {turn.status === 'generating' ? <span className="turn-status"><i /> 생성 중</span> : null}
                 {turn.status === 'error' ? <span className="turn-status turn-status--error">생성 실패</span> : null}
               </div>
@@ -42,4 +42,3 @@ export function ConversationPanel({
     </aside>
   )
 }
-

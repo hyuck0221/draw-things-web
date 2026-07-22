@@ -4,13 +4,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { WorkspaceSession } from '../domain/types'
 
 const storage = vi.hoisted(() => ({
-  listSessions: vi.fn(),
+  listSessionsWithRevision: vi.fn(),
   putSession: vi.fn(),
   deleteSession: vi.fn(),
 }))
 
 vi.mock('../lib/storage', () => ({
-  listSessions: storage.listSessions,
+  listSessionsWithRevision: storage.listSessionsWithRevision,
+  readWorkspaceRevision: () => 1,
   putSession: storage.putSession,
   deleteSession: storage.deleteSession,
 }))
@@ -50,7 +51,10 @@ async function flushPromises() {
 
 beforeEach(async () => {
   vi.useFakeTimers()
-  storage.listSessions.mockReset().mockResolvedValue([{ ...storedSession }])
+  storage.listSessionsWithRevision.mockReset().mockResolvedValue({
+    sessions: [{ ...storedSession }],
+    revision: 1,
+  })
   storage.putSession.mockReset().mockResolvedValue(undefined)
   storage.deleteSession.mockReset().mockResolvedValue(undefined)
   container = document.createElement('div')
@@ -88,6 +92,20 @@ describe('useWorkspace persistence', () => {
     expect(current?.storageError).toBeNull()
   })
 
+  it('does not retry a save rejected because another tab replaced the workspace', async () => {
+    const stale = new Error('stale workspace')
+    stale.name = 'WorkspaceRevisionError'
+    storage.putSession.mockRejectedValue(stale)
+
+    await act(async () => {
+      vi.advanceTimersByTime(10_000)
+      await flushPromises()
+    })
+
+    expect(storage.putSession).toHaveBeenCalledTimes(1)
+    expect(current?.storageError).toContain('stale workspace')
+  })
+
   it('blocks updates and saves for a session while its deletion is pending', async () => {
     let resolveInitialWrite!: () => void
     let resolveDeletion!: () => void
@@ -108,7 +126,7 @@ describe('useWorkspace persistence', () => {
       resolveInitialWrite()
       await flushPromises()
     })
-    expect(storage.deleteSession).toHaveBeenCalledWith(storedSession.id)
+    expect(storage.deleteSession).toHaveBeenCalledWith(storedSession.id, 1)
 
     act(() => {
       current!.updateSession(storedSession.id, (session) => ({ ...session, title: 'must not return' }))
@@ -148,5 +166,34 @@ describe('useWorkspace persistence', () => {
     })
     expect(storage.putSession).toHaveBeenCalled()
     expect(current?.storageError).toContain('delete transaction failed')
+  })
+
+  it('quiesces pending retries during an atomic backup replacement', async () => {
+    storage.putSession.mockRejectedValueOnce(new Error('pause before retry')).mockResolvedValue(undefined)
+
+    await act(async () => {
+      vi.advanceTimersByTime(250)
+      await flushPromises()
+    })
+    expect(storage.putSession).toHaveBeenCalledTimes(1)
+
+    await act(async () => {
+      await current!.pausePersistence()
+      current!.updateSession(storedSession.id, (session) => ({ ...session, title: 'must stay blocked' }))
+      current!.addSession()
+      await current!.deleteSession(storedSession.id)
+      vi.advanceTimersByTime(2_000)
+      await flushPromises()
+    })
+    expect(storage.putSession).toHaveBeenCalledTimes(1)
+    expect(storage.deleteSession).not.toHaveBeenCalled()
+    expect(current?.sessions).toHaveLength(1)
+    expect(current?.sessions[0]?.title).toBe(storedSession.title)
+
+    await act(async () => {
+      current!.resumePersistence()
+      await flushPromises()
+    })
+    expect(storage.putSession).toHaveBeenCalledTimes(2)
   })
 })

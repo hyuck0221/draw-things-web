@@ -10,10 +10,7 @@ import { SettingsPanel } from './components/SettingsPanel'
 import { TopBar } from './components/TopBar'
 import { IconButton } from './components/ui'
 import type {
-  BridgeHealth,
   CanvasItem,
-  ConnectionConfig,
-  DiscoveredEndpoint,
   DrawThingsModel,
   GenerationEvent,
   GenerationMode,
@@ -24,24 +21,21 @@ import type {
 import { useConnectionMonitor } from './hooks/useConnectionMonitor'
 import { useWorkspace } from './hooks/useWorkspace'
 import {
-  bridgeHealth,
-  cancelGeneration,
-  discoverEndpoints,
   generate,
   listInstalledModels,
   normalizeGeneratedImage,
-  testConnection,
 } from './lib/draw-things/client'
-import { createPairingToken, DEFAULT_PARAMETERS } from './lib/defaults'
+import { DEFAULT_PARAMETERS } from './lib/defaults'
 import { PARAMETER_DEFINITIONS } from './lib/draw-things/parameters'
-import {
-  applyRecommendedSettings,
-  didModelTypeChange,
-  readRecommendedSettings,
-} from './lib/draw-things/recommended-settings'
 import { randomUuid } from './lib/ids'
 import { composeEffectivePrompt } from './lib/prompt'
-import { loadPreferences, savePreferences } from './lib/storage'
+import {
+  exportLocalDataBackup,
+  importLocalDataBackup,
+  loadPreferences,
+  MAX_LOCAL_BACKUP_BYTES,
+  savePreferences,
+} from './lib/storage'
 
 interface GenerationState {
   active: boolean
@@ -59,6 +53,11 @@ const IDLE_GENERATION: GenerationState = {
   progress: 0,
   message: '',
 }
+
+const MAXIMUM_DIMENSION = 4_096
+const MAXIMUM_OUTPUT_IMAGES = 4
+const MAXIMUM_TOTAL_PIXELS = 4_096 * 4_096
+const MAXIMUM_INIT_IMAGE_CHARACTERS = 120 * 1024 * 1024
 
 function dataUrlDimensions(dataUrl: string) {
   return new Promise<{ width: number; height: number }>((resolve, reject) => {
@@ -88,37 +87,19 @@ function makeTitle(prompt: string) {
   return compact.length > 28 ? `${compact.slice(0, 28)}…` : compact || '새 캔버스'
 }
 
-function connectionIdentity(connection: ConnectionConfig) {
-  return [
-    connection.transport,
-    connection.protocol,
-    connection.host,
-    connection.port,
-    connection.tls ? 'tls' : 'plain',
-    connection.apiBasePath,
-    connection.bridgeUrl,
-  ].join('|')
+function isVercelOrigin() {
+  return window.location.hostname === 'vercel.app'
+    || window.location.hostname.endsWith('.vercel.app')
 }
 
 export default function App() {
-  const [preferences, setPreferences] = useState<PersistedPreferences>(() => {
-    const loaded = loadPreferences()
-    if (loaded.connection.bridgePairingToken) return loaded
-    return {
-      ...loaded,
-      connection: {
-        ...loaded.connection,
-        bridgePairingToken: createPairingToken(),
-      },
-    }
-  })
+  const [preferences, setPreferences] = useState<PersistedPreferences>(() => loadPreferences())
+  const hydratedPreferencesRevision = useRef<number | undefined>(undefined)
+  const [preferencesReadyRevision, setPreferencesReadyRevision] = useState<number | undefined>(undefined)
   const workspace = useWorkspace(preferences.activeSessionId)
-  const [connectionOpen, setConnectionOpen] = useState(!preferences.connectionConfigured)
+  const [apiStatusOpen, setApiStatusOpen] = useState(() => isVercelOrigin())
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [conversationOpen, setConversationOpen] = useState(false)
-  const [bridge, setBridge] = useState<BridgeHealth | null>(null)
-  const [discovered, setDiscovered] = useState<DiscoveredEndpoint[]>([])
-  const [discovering, setDiscovering] = useState(false)
   const [generationState, setGenerationState] = useState<GenerationState>(IDLE_GENERATION)
   const [installedModels, setInstalledModels] = useState<DrawThingsModel[]>([])
   const [modelsLoading, setModelsLoading] = useState(false)
@@ -126,17 +107,30 @@ export default function App() {
   const [modelsError, setModelsError] = useState(false)
   const [alert, setAlert] = useState<{ kind: 'error' | 'success'; message: string } | null>(null)
   const [preferenceStorageError, setPreferenceStorageError] = useState<string | null>(null)
+  const [backupState, setBackupState] = useState<{
+    busy: boolean
+    message: string
+    error: boolean
+  }>({ busy: false, message: '', error: false })
   const cancelledRequests = useRef(new Set<string>())
   const generationLock = useRef(false)
-  const generationAbortController = useRef<AbortController | null>(null)
   const terminalRequest = useRef<string | null>(null)
   const modelRequestSequence = useRef(0)
+  const modelRefreshInFlight = useRef<Promise<void> | null>(null)
 
   const mergeRemoteOptions = useCallback((remote: Record<string, unknown>) => {
     const validKeys = new Set(PARAMETER_DEFINITIONS.map((definition) => definition.key))
+    const remoteModel = typeof remote.model === 'string' ? remote.model.trim() : ''
+    if (remoteModel) {
+      setInstalledModels((current) => current.length === 1 && current[0]?.file === remoteModel
+        ? current
+        : [{ file: remoteModel, name: remoteModel, source: 'http-current' }])
+      setModelsMessage('Draw Things에서 현재 선택한 모델입니다.')
+      setModelsError(false)
+    }
     setPreferences((current) => {
-      const identity = connectionIdentity(current.connection)
-      if (current.hydratedConnectionKey === identity) return current
+      const apiOrigin = window.location.origin
+      if (current.hydratedApiOrigin === apiOrigin) return current
       const updates: GenerationParameters = {}
       for (const [key, value] of Object.entries(remote)) {
         if (!validKeys.has(key) || key === 'prompt' || key === 'negative_prompt' || value === null) continue
@@ -148,51 +142,39 @@ export default function App() {
       return {
         ...current,
         parameters: nextParameters,
-        hydratedConnectionKey: identity,
+        hydratedApiOrigin: apiOrigin,
       }
     })
   }, [])
 
+  const preferencesReady = !workspace.loading && preferencesReadyRevision === workspace.revision
   const monitor = useConnectionMonitor({
-    connection: preferences.connection,
-    enabled: preferences.connectionConfigured,
-    busy: generationState.active,
+    busy: generationState.active || !preferencesReady,
     onRemoteOptions: mergeRemoteOptions,
   })
 
   useEffect(() => {
-    const timeout = window.setTimeout(() => {
-      try {
-        savePreferences({
-          ...preferences,
-          activeSessionId: workspace.activeId || preferences.activeSessionId,
-        })
-        setPreferenceStorageError(null)
-      } catch (error) {
-        const detail = error instanceof Error ? ` (${error.message})` : ''
-        setPreferenceStorageError(`연결·생성 설정을 브라우저에 저장할 수 없습니다${detail}`)
-      }
-    }, 0)
-    return () => window.clearTimeout(timeout)
-  }, [preferences, workspace.activeId])
+    if (workspace.loading || hydratedPreferencesRevision.current === workspace.revision) return
+    hydratedPreferencesRevision.current = workspace.revision
+    setPreferences(workspace.persistedPreferences ?? loadPreferences(workspace.revision))
+    setPreferencesReadyRevision(workspace.revision)
+  }, [workspace.loading, workspace.persistedPreferences, workspace.revision])
 
   useEffect(() => {
-    if (!preferences.connectionConfigured || preferences.connection.transport !== 'bridge') {
-      return
-    }
-    let cancelled = false
-    const check = async () => {
-      try {
-        const next = await bridgeHealth(preferences.connection)
-        if (!cancelled) setBridge(next)
-      } catch {
-        if (!cancelled) setBridge(null)
-      }
-    }
-    void check()
-    const interval = window.setInterval(check, 5_000)
-    return () => { cancelled = true; window.clearInterval(interval) }
-  }, [preferences.connection, preferences.connectionConfigured])
+    if (workspace.loading || preferencesReadyRevision !== workspace.revision) return
+    const timeout = window.setTimeout(() => {
+      void savePreferences({
+          ...preferences,
+          activeSessionId: workspace.activeId || preferences.activeSessionId,
+        }, workspace.revision).then(() => {
+        setPreferenceStorageError(null)
+      }, (error: unknown) => {
+        const detail = error instanceof Error ? ` (${error.message})` : ''
+        setPreferenceStorageError(`생성 설정을 브라우저에 저장할 수 없습니다${detail}`)
+      })
+    }, 0)
+    return () => window.clearTimeout(timeout)
+  }, [preferences, preferencesReadyRevision, workspace.activeId, workspace.loading, workspace.revision])
 
   const activeSession = workspace.activeSession
   const prompt = activeSession?.draftPrompt ?? ''
@@ -205,92 +187,64 @@ export default function App() {
     && (mode === 'txt2img' || capabilities.canImageToImage))
   const models = useMemo(() => {
     const merged = new Map<string, DrawThingsModel>()
-    for (const model of [...installedModels, ...(monitor.result?.capabilities.models ?? [])]) {
+    for (const model of installedModels) {
       if (!model.file) continue
-      const existing = merged.get(model.file)
-      merged.set(model.file, {
-        ...existing,
-        ...model,
-        ...(existing?.recommendedSettings && !model.recommendedSettings
-          ? { recommendedSettings: existing.recommendedSettings }
-          : {}),
-      })
+      merged.set(model.file, model)
     }
     const current = String(preferences.parameters.model ?? '').trim()
     if (current && !merged.has(current)) merged.set(current, { file: current, name: current })
     return [...merged.values()]
-  }, [installedModels, monitor.result?.capabilities.models, preferences.parameters.model])
+  }, [installedModels, preferences.parameters.model])
 
-  const refreshModels = useCallback(async () => {
+  const refreshModels = useCallback((syncSelection = false) => {
+    if (generationLock.current) {
+      setModelsMessage('이미지 생성이 끝난 뒤 현재 모델을 다시 확인할 수 있습니다.')
+      return Promise.resolve()
+    }
     const sequence = ++modelRequestSequence.current
     setModelsLoading(true)
-    try {
-      const result = await listInstalledModels(
-        preferences.connection,
-        String(preferences.parameters.model ?? ''),
-        (Array.isArray(preferences.parameters.loras) ? preferences.parameters.loras : [])
-          .map((value) => typeof value.file === 'string' ? value.file.trim() : '')
-          .filter(Boolean),
-      )
-      if (modelRequestSequence.current !== sequence) return
-      setInstalledModels(result.models)
-      setModelsMessage(result.warnings[0] ?? `${result.models.length}개 설치 모델을 확인했습니다.`)
-      setModelsError(false)
-    } catch (error) {
-      if (modelRequestSequence.current !== sequence) return
-      setInstalledModels([])
-      setModelsMessage(error instanceof Error ? error.message : '설치 모델 목록을 읽지 못했습니다.')
-      setModelsError(true)
-    } finally {
-      if (modelRequestSequence.current === sequence) setModelsLoading(false)
-    }
-  }, [preferences.connection, preferences.parameters.loras, preferences.parameters.model])
+    const operation = (async () => {
+      try {
+        const result = await listInstalledModels(
+          String(preferences.parameters.model ?? ''),
+        )
+        if (modelRequestSequence.current !== sequence) return
+        setInstalledModels(result.models)
+        const currentModel = result.models[0]?.file
+        if (syncSelection && currentModel) {
+          setPreferences((current) => String(current.parameters.model ?? '') === currentModel
+            ? current
+            : { ...current, parameters: { ...current.parameters, model: currentModel } })
+        }
+        setModelsMessage(result.warnings[0] ?? (result.models.length
+          ? 'Draw Things에서 현재 선택한 모델입니다.'
+          : 'Draw Things에서 선택한 모델을 확인하지 못했습니다.'))
+        setModelsError(!result.ok || result.stale)
+      } catch (error) {
+        if (modelRequestSequence.current !== sequence) return
+        setInstalledModels([])
+        setModelsMessage(error instanceof Error ? error.message : '현재 모델을 읽지 못했습니다.')
+        setModelsError(true)
+      } finally {
+        if (modelRequestSequence.current === sequence) setModelsLoading(false)
+      }
+    })()
+    modelRefreshInFlight.current = operation
+    void operation.finally(() => {
+      if (modelRefreshInFlight.current === operation) modelRefreshInFlight.current = null
+    })
+    return operation
+  }, [preferences.parameters.model])
 
-  useEffect(() => {
-    if (!preferences.connectionConfigured) return
-    const available = preferences.connection.transport === 'bridge' ? Boolean(bridge?.ok) : online
-    if (!available) return
-    const initial = window.setTimeout(() => { void refreshModels() }, 0)
-    const interval = window.setInterval(() => { void refreshModels() }, 30_000)
-    return () => { window.clearTimeout(initial); window.clearInterval(interval) }
-  }, [bridge?.ok, online, preferences.connection.transport, preferences.connectionConfigured, refreshModels])
+  const refreshCurrentModel = useCallback(() => {
+    void refreshModels(true)
+  }, [refreshModels])
 
   const changeModel = (nextFile: string) => {
-    const previousFile = String(preferences.parameters.model ?? '')
-    if (previousFile === nextFile) return
-    const previousModel = models.find((model) => model.file === previousFile)
-      ?? (previousFile ? { file: previousFile } : undefined)
-    const nextModel = models.find((model) => model.file === nextFile) ?? { file: nextFile }
-    const recommendation = readRecommendedSettings(nextModel)
-    const typeChanged = didModelTypeChange(previousModel, nextModel)
-
-    if (typeChanged && recommendation) {
-      const displayName = nextModel.name ?? nextModel.file
-      const apply = window.confirm(
-        `“${displayName}”은(는) 다른 모델 유형입니다.\n\n`
-        + `Draw Things 권장 프로필 “${recommendation.profileName}”을 적용할까요?\n`
-        + '확인을 누르면 Draw Things 기본값 위에 현재 크기·시드를 놓은 뒤 권장 프로필 전체를 적용합니다. 프로필이 크기·시드를 지정하면 그 값이 우선합니다. 취소를 누르면 현재 설정을 유지합니다.',
-      )
-      if (apply) {
-        setPreferences((current) => ({
-          ...current,
-          parameters: applyRecommendedSettings(current.parameters, DEFAULT_PARAMETERS, recommendation),
-        }))
-        setAlert({ kind: 'success', message: `“${recommendation.profileName}” 권장 설정을 적용했습니다.` })
-        return
-      }
-    }
-
     setPreferences((current) => ({
       ...current,
       parameters: { ...current.parameters, model: nextFile },
     }))
-    if (typeChanged && !recommendation) {
-      setAlert({
-        kind: 'error',
-        message: '모델은 변경했지만 로컬 configs.json에서 이 모델 유형의 권장 설정을 찾지 못해 현재 설정을 유지했습니다.',
-      })
-    }
   }
 
   const updateParameter = (key: string, value: ParameterValue) => {
@@ -299,40 +253,6 @@ export default function App() {
       return
     }
     setPreferences((current) => ({ ...current, parameters: { ...current.parameters, [key]: value } }))
-  }
-
-  const saveConnection = (connection: ConnectionConfig) => {
-    modelRequestSequence.current += 1
-    setBridge(null)
-    setInstalledModels([])
-    setModelsMessage('')
-    setModelsError(false)
-    setModelsLoading(false)
-    monitor.setResult(null)
-    monitor.setPhase('connecting')
-    setPreferences((current) => ({
-      ...current,
-      connection,
-      connectionConfigured: true,
-      hydratedConnectionKey: undefined,
-    }))
-  }
-
-  const testDraftConnection = async (connection: ConnectionConfig) => {
-    return testConnection(connection)
-  }
-
-  const discover = async (connection: ConnectionConfig) => {
-    setDiscovering(true)
-    try {
-      const endpoints = await discoverEndpoints(connection)
-      setDiscovered(endpoints)
-      if (!endpoints.length) setAlert({ kind: 'error', message: '기본 루프백 주소에서 Draw Things API를 찾지 못했습니다.' })
-    } catch (error) {
-      setAlert({ kind: 'error', message: error instanceof Error ? error.message : '자동 탐색에 실패했습니다.' })
-    } finally {
-      setDiscovering(false)
-    }
   }
 
   const updateActive = workspace.updateActive
@@ -431,14 +351,15 @@ export default function App() {
     if (!activeSession || !prompt.trim() || generationState.active || generationLock.current) return
     generationLock.current = true
     try {
+      await modelRefreshInFlight.current
       const live = await monitor.test()
       if (!live.ok || !live.capabilities.canGenerate) {
         setAlert({ kind: 'error', message: live.ok ? '연결은 됐지만 현재 API 설정으로는 이미지를 생성할 수 없습니다.' : live.message })
-        setConnectionOpen(true)
+        setApiStatusOpen(true)
         return
       }
       if (mode === 'img2img' && !live.capabilities.canImageToImage) {
-        setAlert({ kind: 'error', message: '선택 이미지로 이어 그리기(img2img)는 현재 HTTP API에서만 지원됩니다. gRPC에서는 txt2img를 사용하세요.' })
+        setAlert({ kind: 'error', message: '현재 Draw Things HTTP API에서 선택 이미지로 이어 그리기(img2img)를 사용할 수 없습니다.' })
         return
       }
       const requestId = randomUuid()
@@ -450,9 +371,25 @@ export default function App() {
       }
       const width = Number(requestParameters.width)
       const height = Number(requestParameters.height)
-      const maximumDimension = preferences.connection.protocol === 'grpc' ? 4_096 : 8_192
-      if (width < 128 || height < 128 || width > maximumDimension || height > maximumDimension) {
-        setAlert({ kind: 'error', message: `이미지 너비와 높이는 현재 ${preferences.connection.protocol.toUpperCase()} 연결에서 128–${maximumDimension} 범위여야 합니다.` })
+      const batchCount = Number(requestParameters.batch_count)
+      const batchSize = Number(requestParameters.batch_size)
+      const outputImages = batchCount * batchSize
+      const totalPixels = width * height * outputImages
+      if (width < 128 || height < 128 || width > MAXIMUM_DIMENSION || height > MAXIMUM_DIMENSION) {
+        setAlert({ kind: 'error', message: `이미지 너비와 높이는 128–${MAXIMUM_DIMENSION} 범위여야 합니다.` })
+        return
+      }
+      if (!Number.isInteger(batchCount) || !Number.isInteger(batchSize)
+        || batchCount < 1 || batchSize < 1 || outputImages > MAXIMUM_OUTPUT_IMAGES) {
+        setAlert({ kind: 'error', message: `한 요청에서는 배치 반복 × 배치 크기로 최대 ${MAXIMUM_OUTPUT_IMAGES}개 이미지를 생성할 수 있습니다.` })
+        return
+      }
+      if (!Number.isSafeInteger(totalPixels) || totalPixels > MAXIMUM_TOTAL_PIXELS) {
+        setAlert({ kind: 'error', message: '한 요청의 총 출력 해상도는 4096×4096 픽셀 예산을 넘을 수 없습니다.' })
+        return
+      }
+      if (mode === 'img2img' && selected && selected.dataUrl.length > MAXIMUM_INIT_IMAGE_CHARACTERS) {
+        setAlert({ kind: 'error', message: '선택 이미지가 안전한 요청 크기 제한을 초과했습니다.' })
         return
       }
       if (mode === 'txt2img' && (width % 64 !== 0 || height % 64 !== 0)) {
@@ -472,18 +409,16 @@ export default function App() {
       setGenerationState({ active: true, cancellable: true, requestId, sessionId, progress: 0, message: '연결을 확인하고 요청을 전송합니다' })
       cancelledRequests.current.delete(requestId)
       terminalRequest.current = null
-      const abortController = new AbortController()
-      generationAbortController.current = abortController
       try {
         let terminalEventReceived = false
-        const stream = generate(preferences.connection, {
+        const stream = generate({
           id: requestId,
           mode,
           prompt: effectivePrompt,
           negativePrompt: preferences.negativePrompt,
           parameters: requestParameters,
           initImage: mode === 'img2img' ? selected?.dataUrl : undefined,
-        }, abortController.signal)
+        })
         for await (const event of stream) {
           if (cancelledRequests.current.has(requestId)) break
           if (event.type === 'accepted') {
@@ -520,7 +455,6 @@ export default function App() {
           setAlert({ kind: 'error', message })
         }
       } finally {
-        if (generationAbortController.current === abortController) generationAbortController.current = null
         if (terminalRequest.current === requestId) terminalRequest.current = null
         cancelledRequests.current.delete(requestId)
         setGenerationState(IDLE_GENERATION)
@@ -530,16 +464,79 @@ export default function App() {
     }
   }
 
-  const cancel = async () => {
+  const cancel = () => {
     const requestId = generationState.requestId
     const sessionId = generationState.sessionId
     if (!requestId || terminalRequest.current === requestId || cancelledRequests.current.has(requestId)) return
     cancelledRequests.current.add(requestId)
-    generationAbortController.current?.abort()
-    setGenerationState((current) => ({ ...current, cancellable: false, message: '생성을 중단하는 중입니다…' }))
-    try { await cancelGeneration(preferences.connection, requestId) } catch { /* UI cancellation still applies */ }
+    setGenerationState((current) => ({ ...current, cancellable: false, message: '결과를 폐기했습니다. Draw Things 작업 종료를 기다립니다…' }))
     if (sessionId) {
-      markTurnCancelled(sessionId, requestId, '화면에서 생성을 중단했습니다. HTTP 모드에서는 앱 내부 작업이 계속될 수 있습니다.')
+      markTurnCancelled(sessionId, requestId, '결과를 폐기했습니다. Draw Things 앱 내부 작업이 끝나면 다음 생성을 시작할 수 있습니다.')
+    }
+    setAlert({ kind: 'error', message: '이 결과는 캔버스에 추가하지 않습니다. Draw Things 작업 종료까지 잠시 기다려 주세요.' })
+  }
+
+  const exportBackup = async () => {
+    if (generationState.active || backupState.busy) {
+      setBackupState({ busy: false, message: '이미지 생성이 끝난 뒤 로컬 백업을 내보내세요.', error: true })
+      return
+    }
+    setBackupState({ busy: true, message: '로컬 캔버스와 이미지를 백업하는 중입니다…', error: false })
+    try {
+      const backup = await exportLocalDataBackup({
+        ...preferences,
+        activeSessionId: workspace.activeId || preferences.activeSessionId,
+      }, workspace.sessions, workspace.revision)
+      const url = URL.createObjectURL(new Blob([backup.json], { type: 'application/json' }))
+      try {
+        const anchor = document.createElement('a')
+        anchor.href = url
+        anchor.download = backup.fileName
+        document.body.append(anchor)
+        anchor.click()
+        anchor.remove()
+      } finally {
+        window.setTimeout(() => URL.revokeObjectURL(url), 0)
+      }
+      const message = `백업을 저장했습니다. 세션 ${backup.sessionCount}개 · 이미지 ${backup.imageCount}개`
+      setBackupState({ busy: false, message, error: false })
+      setAlert({ kind: 'success', message })
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '로컬 백업을 만들지 못했습니다.'
+      setBackupState({ busy: false, message, error: true })
+      setAlert({ kind: 'error', message })
+    }
+  }
+
+  const importBackup = async (file: File) => {
+    if (generationState.active || backupState.busy) {
+      setBackupState({ busy: false, message: '이미지 생성이 끝난 뒤 백업을 가져오세요.', error: true })
+      return
+    }
+    if (file.size === 0 || file.size > MAX_LOCAL_BACKUP_BYTES) {
+      setBackupState({ busy: false, message: '백업 파일은 비어 있지 않아야 하며 256 MiB 이하여야 합니다.', error: true })
+      return
+    }
+    if (!window.confirm('현재 이 주소에 저장된 모든 캔버스, 이미지와 생성 설정을 백업 내용으로 교체할까요?')) {
+      setBackupState({ busy: false, message: '백업 가져오기를 취소했습니다.', error: false })
+      return
+    }
+    setBackupState({ busy: true, message: '백업 파일을 검사하고 로컬 저장소로 옮기는 중입니다…', error: false })
+    let persistencePaused = false
+    try {
+      const serialized = await file.text()
+      await workspace.pausePersistence()
+      persistencePaused = true
+      const imported = await importLocalDataBackup(serialized, workspace.revision)
+      const message = `백업을 가져왔습니다. 세션 ${imported.sessionCount}개 · 이미지 ${imported.imageCount}개 · 화면을 다시 엽니다.`
+      setBackupState({ busy: true, message, error: false })
+      setAlert({ kind: 'success', message })
+      window.setTimeout(() => window.location.reload(), 600)
+    } catch (error) {
+      if (persistencePaused) workspace.resumePersistence()
+      const message = error instanceof Error ? error.message : '백업 파일을 가져오지 못했습니다.'
+      setBackupState({ busy: false, message, error: true })
+      setAlert({ kind: 'error', message })
     }
   }
 
@@ -567,7 +564,7 @@ export default function App() {
 
   return (
     <div className="app-shell">
-      <TopBar sessionTitle={activeSession.title} storageError={workspace.storageError ?? preferenceStorageError} phase={monitor.phase} result={monitor.result} generating={generationState.active} onOpenConnection={() => setConnectionOpen(true)} onOpenConversation={() => setConversationOpen(true)} />
+      <TopBar sessionTitle={activeSession.title} storageError={workspace.storageError ?? preferenceStorageError} phase={monitor.phase} result={monitor.result} generating={generationState.active} onOpenStatus={() => setApiStatusOpen(true)} onOpenConversation={() => setConversationOpen(true)} />
       <div className="workspace-layout">
         <SessionRail sessions={workspace.sessions} activeId={workspace.activeId} collapsed={preferences.compactSidebar} onCollapsedChange={(compactSidebar) => setPreferences((current) => ({ ...current, compactSidebar }))} onCreate={workspace.addSession} onSelect={workspace.setActiveId} onDelete={deleteSession} />
         <main className="canvas-column">
@@ -604,17 +601,30 @@ export default function App() {
             onUseSelectedChange={(useSelectedImage) => updateActive((session) => ({ ...session, useSelectedImage }))}
             onSubmit={startGeneration}
             onCancel={cancel}
-            onOpenConnection={() => setConnectionOpen(true)}
+            onOpenStatus={() => setApiStatusOpen(true)}
             onModelChange={changeModel}
-            onRefreshModels={refreshModels}
+            onRefreshModels={refreshCurrentModel}
             onOpenSettings={() => setSettingsOpen(true)}
           />
         </main>
-        <InspectorPanel protocol={preferences.connection.protocol} selected={selected} parameters={preferences.parameters} models={models} modelsLoading={modelsLoading} modelsMessage={modelsMessage} onRefreshModels={refreshModels} onChange={updateParameter} onOpenAll={() => setSettingsOpen(true)} onUseSelected={() => updateActive((session) => ({ ...session, useSelectedImage: !session.useSelectedImage }))} useSelected={useSelected} />
+        <InspectorPanel selected={selected} parameters={preferences.parameters} models={models} modelsLoading={modelsLoading} modelsMessage={modelsMessage} onRefreshModels={refreshCurrentModel} onChange={updateParameter} onOpenAll={() => setSettingsOpen(true)} onUseSelected={() => updateActive((session) => ({ ...session, useSelectedImage: !session.useSelectedImage }))} useSelected={useSelected} />
       </div>
 
-      <SettingsPanel open={settingsOpen} protocol={preferences.connection.protocol} mode={mode} values={preferences.parameters} models={models} onChange={updateParameter} onClose={() => setSettingsOpen(false)} onReset={() => setPreferences((current) => ({ ...current, parameters: { ...DEFAULT_PARAMETERS } }))} />
-      {connectionOpen ? <ConnectionPanel open connection={preferences.connection} result={monitor.result} bridge={bridge} discovered={discovered} testing={monitor.testing} discovering={discovering} onClose={() => setConnectionOpen(false)} onSave={saveConnection} onTest={testDraftConnection} onDiscover={discover} /> : null}
+      <SettingsPanel open={settingsOpen} mode={mode} values={preferences.parameters} models={models} onChange={updateParameter} onClose={() => setSettingsOpen(false)} onReset={() => setPreferences((current) => ({ ...current, parameters: { ...DEFAULT_PARAMETERS } }))} />
+      {apiStatusOpen ? (
+        <ConnectionPanel
+          open
+          result={monitor.result}
+          testing={monitor.testing}
+          backupBusy={backupState.busy}
+          backupMessage={backupState.message}
+          backupError={backupState.error}
+          onClose={() => setApiStatusOpen(false)}
+          onRetry={() => { void monitor.test() }}
+          onExportBackup={() => { void exportBackup() }}
+          onImportBackup={(file) => { void importBackup(file) }}
+        />
+      ) : null}
 
       {alert ? (
         <div className={`app-toast app-toast--${alert.kind}`} role="status">

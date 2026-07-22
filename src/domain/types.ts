@@ -1,34 +1,9 @@
-export type ApiProtocol = 'http' | 'grpc'
-export type TransportMode = 'bridge' | 'direct'
 export type ConnectionPhase =
-  | 'unconfigured'
-  | 'requesting-permission'
   | 'connecting'
   | 'online'
   | 'degraded'
   | 'offline'
-  | 'permission-denied'
-  | 'cors-or-tls-blocked'
   | 'api-mismatch'
-
-export interface ConnectionConfig {
-  transport: TransportMode
-  protocol: ApiProtocol
-  host: string
-  port: number
-  tls: boolean
-  apiBasePath: string
-  sharedSecret: string
-  rememberSecret: boolean
-  clientName: string
-  bridgeUrl: string
-  bridgePairingToken: string
-  allowSelfSignedCertificate: boolean
-  tlsFingerprintSha256: string
-  expectedBridgeMode: boolean
-  expectedResponseCompression: boolean
-  expectedModelBrowsing: boolean
-}
 
 export interface DrawThingsModel {
   file: string
@@ -41,7 +16,7 @@ export interface DrawThingsModel {
 export interface ModelCatalogResult {
   ok: boolean
   models: DrawThingsModel[]
-  source: 'grpc-echo' | 'local-metadata' | 'http-current' | 'combined' | 'none'
+  source: 'http-current' | 'none'
   checkedAt: number
   stale: boolean
   directoriesScanned: number
@@ -49,14 +24,11 @@ export interface ModelCatalogResult {
 }
 
 export interface ServerCapabilities {
-  protocol: ApiProtocol
   canGenerate: boolean
   canImageToImage: boolean
   canStreamProgress: boolean
   canCancel: boolean
   canBrowseModels: boolean
-  requiresHttpModeForCanvas: boolean
-  sharedSecretRequired: boolean
   models: DrawThingsModel[]
   loras: Array<Record<string, unknown>>
   controls: Array<Record<string, unknown>>
@@ -77,27 +49,6 @@ export interface ConnectionTestResult {
   remoteOptions?: Record<string, unknown>
   diagnosticCode?: string
   warnings?: string[]
-  certificate?: {
-    fingerprintSha256?: string
-    authorized?: boolean
-    authorizationError?: string
-    subject?: string
-    issuer?: string
-    validFrom?: string
-    validTo?: string
-  }
-}
-
-export interface DiscoveredEndpoint {
-  id: string
-  name: string
-  protocol: ApiProtocol
-  host: string
-  port: number
-  tls: boolean
-  source: 'loopback' | 'bonjour' | 'manual'
-  latencyMs: number
-  message?: string
 }
 
 export type ParameterValue = string | number | boolean | Array<Record<string, unknown>>
@@ -172,21 +123,11 @@ export interface WorkspaceSession {
 }
 
 export interface PersistedPreferences {
-  version: 1
-  connectionConfigured: boolean
-  connection: ConnectionConfig
+  version: 2
   parameters: GenerationParameters
   activeSessionId?: string
-  hydratedConnectionKey?: string
+  hydratedApiOrigin?: string
   negativePrompt: string
   advancedPanelOpen: boolean
   compactSidebar: boolean
-}
-
-export interface BridgeHealth {
-  ok: boolean
-  name: string
-  version: string
-  paired: boolean
-  allowedOrigin?: string
 }

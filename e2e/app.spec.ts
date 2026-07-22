@@ -1,38 +1,47 @@
-import { expect, test } from '@playwright/test'
+import { expect, test, type Page } from '@playwright/test'
 
-test('guides a first-time user through local connection setup', async ({ page }) => {
-  await page.route('http://127.0.0.1:47821/v1/bridge/health', async (route) => route.abort())
-  await page.goto('/')
-  const dialog = page.getByRole('dialog', { name: 'Draw Things 연결' })
-  await expect(dialog).toBeVisible()
-  await expect(dialog.getByText('로컬 커넥터가 가장 안정적입니다')).toBeVisible()
-  await expect(dialog.getByText(/Mac에서 실행하세요/)).toBeVisible()
-  await expect(dialog.getByText(/Node\.js 22\.12 이상/)).toBeVisible()
-  await expect(dialog.getByLabel('호스트')).toHaveValue('127.0.0.1')
-  await expect(dialog.getByRole('button', { name: '연결 테스트' })).toBeEnabled()
-  await expect(dialog.getByRole('button', { name: '이 설정 사용' })).toBeDisabled()
-})
+const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9Wl+AAAAAASUVORK5CYII='
 
-test('loads when an HTTP IP origin does not expose crypto.randomUUID', async ({ page }) => {
-  await page.addInitScript(() => {
-    Object.defineProperty(globalThis.crypto, 'randomUUID', {
-      configurable: true,
-      value: undefined,
+async function mockOptions(page: Page, overrides: Record<string, unknown> = {}) {
+  await page.route('**/sdapi/v1/options', async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        model: 'mock.ckpt',
+        width: 1024,
+        height: 1024,
+        steps: 16,
+        upscaler: '',
+        ...overrides,
+      }),
     })
   })
+}
+
+test('checks the same-origin API automatically and exposes a status dialog', async ({ page }) => {
+  await page.route('**/sdapi/v1/options', async (route) => route.abort())
   await page.goto('/')
-  await expect(page.getByRole('dialog', { name: 'Draw Things 연결' })).toBeVisible()
-  await page.getByRole('button', { name: '연결 옵션 전체 보기' }).click()
-  await expect(page.getByLabel('커넥터 페어링 토큰')).not.toHaveValue('')
+
+  await expect(page.getByRole('heading', { name: '첫 장면을 그려보세요' })).toBeVisible()
+  await page.getByRole('button', { name: 'API 상태 열기' }).click()
+
+  const dialog = page.getByRole('dialog', { name: 'Draw Things API 상태' })
+  await expect(dialog).toBeVisible()
+  await expect(dialog.getByText('별도 연결 설정 없이 현재 사이트와 같은 주소로 통신합니다.')).toBeVisible()
+  await expect(dialog.getByText('http://127.0.0.1:5173/sdapi/v1/options')).toBeVisible()
+  await expect(dialog.getByRole('button', { name: '다시 확인' })).toBeEnabled()
+  await expect(dialog.getByLabel('호스트')).toHaveCount(0)
 })
 
-test('opens the canvas and the complete parameter drawer', async ({ page }, testInfo) => {
+test('opens the canvas and the complete HTTP parameter drawer', async ({ page }, testInfo) => {
   test.skip(testInfo.project.name !== 'chromium')
+  await mockOptions(page)
   await page.goto('/')
-  await page.getByRole('button', { name: '나중에' }).click()
+
   await expect(page.getByRole('heading', { name: '첫 장면을 그려보세요' })).toBeVisible()
-  await expect(page.getByRole('button', { name: /연결 상태: 연결 안 됨/ })).toBeVisible()
   await expect(page.getByLabel('이미지 프롬프트')).toBeVisible()
+  await expect(page.getByRole('button', { name: /API 상태: Draw Things 연결됨/ })).toBeVisible()
 
   await page.getByRole('button', { name: '전체 API 설정' }).click()
   await expect(page.getByRole('complementary', { name: '전체 생성 설정' })).toBeVisible()
@@ -43,132 +52,49 @@ test('opens the canvas and the complete parameter drawer', async ({ page }, test
 
 test('keeps the essential workflow usable on a phone-sized viewport', async ({ page }, testInfo) => {
   test.skip(testInfo.project.name !== 'mobile-chromium')
-  await page.route('http://127.0.0.1:47821/v1/models', async (route) => route.abort())
+  await mockOptions(page)
   await page.goto('/')
-  await page.getByRole('button', { name: '나중에' }).click()
+
   await expect(page.getByLabel('이미지 프롬프트')).toBeVisible()
-  await expect(page.getByRole('button', { name: /연결 상태: 연결 안 됨/ })).toBeVisible()
-  await expect(page.locator('.connection-pill__label--mobile')).toHaveText('연결 안 됨')
-  await expect(page.getByLabel('모바일 설치 모델')).toBeVisible()
-  await page.getByRole('button', { name: '설치 모델 목록 새로고침' }).click()
-  await expect(page.getByRole('alert')).toBeVisible()
+  await expect(page.locator('.connection-pill__label--mobile')).toHaveText('연결됨')
+  const mobileOptions = page.locator('.prompt-options-mobile')
+  await expect(mobileOptions.getByLabel('현재 Draw Things 모델')).toHaveValue('mock.ckpt')
+  await mobileOptions.getByRole('button', { name: '현재 모델 다시 확인' }).click()
+  await expect(mobileOptions.getByLabel('현재 Draw Things 모델')).toHaveValue('mock.ckpt')
+
   await page.getByRole('button', { name: '전체 설정' }).click()
   await expect(page.getByRole('complementary', { name: '전체 생성 설정' })).toBeVisible()
   await page.getByRole('button', { name: '설정 닫기' }).click()
-  await expect(page.getByRole('main').getByRole('button', { name: '연결 설정', exact: true })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'API 상태 열기' })).toBeVisible()
 })
 
-test('connects, generates, and restores a local canvas through the bridge contract', async ({ page }, testInfo) => {
+test('generates and restores a local canvas through the direct HTTP contract', async ({ page }, testInfo) => {
   test.skip(testInfo.project.name !== 'chromium')
-  await page.goto('/')
-  const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9Wl+AAAAAASUVORK5CYII='
-  const capabilities = {
-    protocol: 'http',
-    canGenerate: true,
-    canImageToImage: true,
-    canStreamProgress: false,
-    canCancel: false,
-    canBrowseModels: false,
-    requiresHttpModeForCanvas: false,
-    sharedSecretRequired: false,
-    models: [],
-    loras: [],
-    controls: [],
-    textualInversions: [],
-    limitations: [],
-  }
-  let generatedWithModel = ''
+  let generatedBody: Record<string, unknown> | undefined
 
-  await page.route('http://127.0.0.1:47821/**', async (route) => {
-    const request = route.request()
-    const path = new URL(request.url()).pathname
-    if (path === '/v1/bridge/health') {
-      await route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        body: JSON.stringify({ ok: true, name: 'test-bridge', version: 'test', paired: true }),
-      })
-      return
-    }
-    if (path === '/v1/test') {
-      await route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        body: JSON.stringify({
-          ok: true,
-          latencyMs: 2,
-          checkedAt: Date.now(),
-          phase: 'online',
-          message: 'Draw Things HTTP API에 연결했습니다.',
-          endpoint: 'http://127.0.0.1:7859',
-          capabilities,
-          remoteOptions: { model: 'mock.ckpt', width: 1024, height: 1024 },
-        }),
-      })
-      return
-    }
-    if (path === '/v1/models') {
-      await route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        body: JSON.stringify({
-          ok: true,
-          models: [
-            { file: 'mock.ckpt', name: 'Mock Model' },
-            { file: 'second.ckpt', name: 'Second Model' },
-          ],
-          source: 'local-metadata',
-          checkedAt: Date.now(),
-          stale: false,
-          directoriesScanned: 1,
-          warnings: [],
-        }),
-      })
-      return
-    }
-    if (path === '/v1/generate') {
-      const body = JSON.parse(request.postData() ?? '{}') as { request?: { id?: string; parameters?: { model?: string } } }
-      const requestId = body.request?.id ?? 'mock-request'
-      generatedWithModel = body.request?.parameters?.model ?? ''
-      await route.fulfill({
-        status: 200,
-        contentType: 'application/x-ndjson',
-        body: [
-          JSON.stringify({ type: 'accepted', requestId, message: '요청을 받았습니다.' }),
-          JSON.stringify({ type: 'result', requestId, images: [png], durationMs: 12 }),
-        ].join('\n'),
-      })
-      return
-    }
-    await route.fulfill({ status: 404, contentType: 'application/json', body: '{}' })
+  await mockOptions(page)
+  await page.route('**/sdapi/v1/txt2img', async (route) => {
+    generatedBody = JSON.parse(route.request().postData() ?? '{}') as Record<string, unknown>
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ images: [png], parameters: {}, info: '' }),
+    })
   })
 
-  await page.reload()
-  const dialog = page.getByRole('dialog', { name: 'Draw Things 연결' })
-  await dialog.getByRole('button', { name: '연결 테스트' }).click()
-  await expect(dialog.getByText('Draw Things HTTP API에 연결했습니다.')).toBeVisible()
-  await expect(dialog.getByText('커넥터와 Draw Things 연결을 확인했습니다')).toBeVisible()
-  await expect(dialog.locator('.connection-result')).toHaveAttribute('role', 'status')
-  await expect(dialog.getByRole('button', { name: '연결 확인됨' })).toBeVisible()
-  await dialog.getByRole('button', { name: '이 설정 사용' }).click()
+  await page.goto('/')
+  await expect(page.getByRole('button', { name: /API 상태: Draw Things 연결됨/ })).toBeVisible()
 
-  const modelSelect = page.getByLabel('설치된 모델')
-  await expect(modelSelect.locator('option')).toHaveCount(2)
-  await modelSelect.selectOption('second.ckpt')
-
-  await page.getByRole('button', { name: '전체 API 설정' }).click()
-  await page.getByPlaceholder('설정 이름 또는 API 키 검색').fill('리파이너 모델')
-  const refinerSelect = page.getByLabel('리파이너 모델')
-  await expect(refinerSelect.locator('option')).toHaveCount(3)
-  await refinerSelect.selectOption('mock.ckpt')
-  await refinerSelect.selectOption('')
-  await expect(refinerSelect).toHaveValue('')
-  await page.getByRole('button', { name: '설정 닫기' }).click()
+  const modelSelect = page.locator('.inspector-panel').getByLabel('현재 Draw Things 모델')
+  await expect(modelSelect.locator('option')).toHaveCount(1)
+  await expect(modelSelect).toHaveValue('mock.ckpt')
 
   await page.getByLabel('이미지 프롬프트').fill('보랏빛 숲의 작은 여우')
   await page.getByRole('button', { name: /생성/ }).click()
   await expect(page.locator('.canvas-item img')).toBeVisible()
-  expect(generatedWithModel).toBe('second.ckpt')
+  expect(generatedBody?.prompt).toBe('보랏빛 숲의 작은 여우')
+  expect(generatedBody?.model).toBe('mock.ckpt')
+  expect(generatedBody).not.toHaveProperty('upscaler')
   await expect(page.getByLabel('이미지 프롬프트')).toHaveValue('')
 
   await page.waitForTimeout(400)
@@ -176,10 +102,224 @@ test('connects, generates, and restores a local canvas through the bridge contra
   await expect(page.locator('.canvas-item img')).toBeVisible()
 })
 
+test('pauses options polling while an HTTP generation request is pending', async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== 'chromium')
+  let optionsRequests = 0
+  let releaseGeneration!: () => void
+  let markGenerationStarted!: () => void
+  const generationRelease = new Promise<void>((resolve) => { releaseGeneration = resolve })
+  const generationStarted = new Promise<void>((resolve) => { markGenerationStarted = resolve })
+
+  await page.route('**/sdapi/v1/options', async (route) => {
+    optionsRequests += 1
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        model: 'mock.ckpt',
+        width: 512,
+        height: 512,
+        steps: 16,
+        upscaler: '',
+      }),
+    })
+  })
+  await page.route('**/sdapi/v1/txt2img', async (route) => {
+    markGenerationStarted()
+    await generationRelease
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ images: [png], parameters: {}, info: '' }),
+    })
+  })
+
+  await page.goto('/')
+  await expect(page.getByRole('button', { name: /API 상태: Draw Things 연결됨/ })).toBeVisible()
+  await page.getByLabel('이미지 프롬프트').fill('생성 중 heartbeat 중지 검사')
+  await page.getByRole('button', { name: /생성/ }).click()
+  await generationStarted
+
+  const requestsAtGenerationStart = optionsRequests
+  try {
+    await page.waitForTimeout(5_500)
+    expect(optionsRequests).toBe(requestsAtGenerationStart)
+  } finally {
+    releaseGeneration()
+  }
+  await expect(page.locator('.canvas-item img')).toBeVisible()
+})
+
+test('discards a cancelled result while keeping the generation lock until HTTP completion', async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== 'chromium')
+  let releaseGeneration!: () => void
+  let markGenerationStarted!: () => void
+  const generationRelease = new Promise<void>((resolve) => { releaseGeneration = resolve })
+  const generationStarted = new Promise<void>((resolve) => { markGenerationStarted = resolve })
+
+  await mockOptions(page, { width: 512, height: 512 })
+  await page.route('**/sdapi/v1/txt2img', async (route) => {
+    markGenerationStarted()
+    await generationRelease
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ images: [png], parameters: {}, info: '' }),
+    })
+  })
+
+  await page.goto('/')
+  await expect(page.getByRole('button', { name: /API 상태: Draw Things 연결됨/ })).toBeVisible()
+  await page.getByLabel('이미지 프롬프트').fill('폐기할 생성 결과')
+  await page.getByRole('button', { name: /생성/ }).click()
+  await generationStarted
+  try {
+    await page.getByRole('button', { name: '중단' }).click()
+    await expect(page.getByRole('button', { name: '마무리 중' })).toBeDisabled()
+    await expect(page.locator('.canvas-item img')).toHaveCount(0)
+  } finally {
+    releaseGeneration()
+  }
+
+  await expect(page.getByRole('button', { name: /생성/ })).toBeEnabled()
+  await expect(page.locator('.canvas-item img')).toHaveCount(0)
+})
+
+test('waits for a manual model refresh before starting generation', async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== 'chromium')
+  let holdNextOptions = false
+  let releaseOptions!: () => void
+  let markOptionsStarted!: () => void
+  const optionsRelease = new Promise<void>((resolve) => { releaseOptions = resolve })
+  const optionsStarted = new Promise<void>((resolve) => { markOptionsStarted = resolve })
+  let generationRequests = 0
+
+  await page.route('**/sdapi/v1/options', async (route) => {
+    if (holdNextOptions) {
+      holdNextOptions = false
+      markOptionsStarted()
+      await optionsRelease
+    }
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ model: 'mock.ckpt', width: 512, height: 512, steps: 16, upscaler: '' }),
+    })
+  })
+  await page.route('**/sdapi/v1/txt2img', async (route) => {
+    generationRequests += 1
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ images: [png], parameters: {}, info: '' }),
+    })
+  })
+
+  await page.goto('/')
+  await expect(page.getByRole('button', { name: /API 상태: Draw Things 연결됨/ })).toBeVisible()
+  holdNextOptions = true
+  await page.getByRole('button', { name: '현재 모델 다시 확인' }).click()
+  await optionsStarted
+  await page.getByLabel('이미지 프롬프트').fill('모델 확인 뒤 생성')
+  await page.getByRole('button', { name: /생성/ }).click()
+  try {
+    await page.waitForTimeout(200)
+    expect(generationRequests).toBe(0)
+  } finally {
+    releaseOptions()
+  }
+  await expect(page.locator('.canvas-item img')).toBeVisible()
+  expect(generationRequests).toBe(1)
+})
+
+test('moves a complete local canvas through a portable JSON backup', async ({ browser }, testInfo) => {
+  test.skip(testInfo.project.name !== 'chromium')
+  const sourceContext = await browser.newContext({
+    acceptDownloads: true,
+    baseURL: 'http://127.0.0.1:5173',
+  })
+  const targetContext = await browser.newContext({ baseURL: 'http://127.0.0.1:5173' })
+  try {
+    const source = await sourceContext.newPage()
+    await mockOptions(source, { model: 'portable.ckpt', width: 512, height: 512 })
+    await source.route('**/sdapi/v1/txt2img', async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ images: [png], parameters: {}, info: '' }),
+      })
+    })
+    await source.goto('/')
+    await source.getByRole('button', { name: /네거티브 프롬프트/ }).click()
+    await source.getByLabel('네거티브 프롬프트').fill('portable negative prompt')
+    await source.getByLabel('이미지 프롬프트').fill('다른 origin으로 옮길 장면')
+    await source.getByRole('button', { name: /생성/ }).click()
+    await expect(source.locator('.canvas-item img')).toBeVisible()
+    await source.getByRole('button', { name: 'API 상태 열기' }).click()
+
+    const downloadPromise = source.waitForEvent('download')
+    await source.getByRole('button', { name: '백업 내보내기' }).click()
+    const download = await downloadPromise
+    expect(download.suggestedFilename()).toMatch(/^draw-things-canvas-backup_.*\.json$/)
+    const backupPath = await download.path()
+    expect(backupPath).not.toBeNull()
+
+    const staleTab = await targetContext.newPage()
+    await mockOptions(staleTab, { model: 'target.ckpt', width: 1024, height: 1024 })
+    await staleTab.goto('/')
+    await expect(staleTab.locator('.canvas-item img')).toHaveCount(0)
+
+    const target = await targetContext.newPage()
+    await mockOptions(target, { model: 'target.ckpt', width: 1024, height: 1024 })
+    await target.goto('/')
+    await expect(target.locator('.canvas-item img')).toHaveCount(0)
+    await target.getByRole('button', { name: 'API 상태 열기' }).click()
+    target.once('dialog', async (dialog) => dialog.accept())
+    await target.getByLabel('로컬 백업 파일 선택').setInputFiles(backupPath!)
+
+    await expect(target.getByRole('button', { name: 'API 상태 닫기' })).toBeDisabled()
+    await expect(target.getByRole('button', { name: '닫기', exact: true })).toBeDisabled()
+    await expect(target.locator('.canvas-item img')).toBeVisible({ timeout: 15_000 })
+    await expect(target.locator('.inspector-panel').getByLabel('현재 Draw Things 모델')).toHaveValue('portable.ckpt')
+
+    await staleTab.getByLabel('이미지 프롬프트').fill('가져오기 전 탭의 오래된 변경')
+    await staleTab.getByRole('button', { name: /네거티브 프롬프트/ }).click()
+    await staleTab.getByLabel('네거티브 프롬프트').fill('stale negative prompt')
+    await expect(staleTab.locator('.top-bar__session small')).toHaveAttribute('title', /다른 탭에서 로컬 캔버스가 교체되었습니다/)
+    await target.reload()
+    await expect(target.locator('.canvas-item img')).toBeVisible()
+    await expect(target.getByLabel('네거티브 프롬프트')).toHaveValue('portable negative prompt')
+  } finally {
+    await sourceContext.close()
+    await targetContext.close()
+  }
+})
+
+test('preserves migrated v1 generation settings on the first API heartbeat', async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== 'chromium')
+  await mockOptions(page, { model: 'remote.ckpt', width: 512, height: 512 })
+  await page.addInitScript(() => {
+    localStorage.setItem('draw-things-local-canvas:preferences:v1', JSON.stringify({
+      version: 1,
+      parameters: { model: 'legacy.ckpt', width: 768, height: 768, steps: 24 },
+      negativePrompt: 'legacy negative',
+      advancedPanelOpen: false,
+      compactSidebar: false,
+    }))
+  })
+
+  await page.goto('/')
+  await expect(page.getByRole('button', { name: /API 상태: Draw Things 연결됨/ })).toBeVisible()
+  await expect(page.locator('.inspector-panel').getByLabel('현재 Draw Things 모델')).toHaveValue('legacy.ckpt')
+  await expect(page.getByRole('spinbutton', { name: '너비' })).toHaveValue('768')
+  await expect(page.getByRole('spinbutton', { name: '높이' })).toHaveValue('768')
+})
+
 test('migrates embedded v1 images into the v2 image store without losing them', async ({ page }, testInfo) => {
   test.skip(testInfo.project.name !== 'chromium')
-  const png = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9Wl+AAAAAASUVORK5CYII='
+  const legacyPng = `data:image/png;base64,${png}`
 
+  await mockOptions(page)
   await page.route('**/src/main.tsx', async (route) => {
     await route.fulfill({ contentType: 'application/javascript', body: '' })
   })
@@ -232,7 +372,7 @@ test('migrates embedded v1 images into the v2 image store without losing them', 
       transaction.onabort = () => reject(transaction.error)
     })
     db.close()
-  }, png)
+  }, legacyPng)
 
   await page.unroute('**/src/main.tsx')
   await page.reload()

@@ -36,7 +36,7 @@ interface PromptDockProps {
   onUseSelectedChange: (value: boolean) => void
   onSubmit: () => void
   onCancel: () => void
-  onOpenConnection: () => void
+  onOpenStatus: () => void
   onModelChange: (model: string) => void
   onRefreshModels: () => void
   onOpenSettings: () => void
@@ -65,7 +65,7 @@ export function PromptDock({
   onUseSelectedChange,
   onSubmit,
   onCancel,
-  onOpenConnection,
+  onOpenStatus,
   onModelChange,
   onRefreshModels,
   onOpenSettings,
@@ -129,8 +129,8 @@ export function PromptDock({
               <Sparkles size={16} /> 생성 <kbd>⌘↵</kbd>
             </Button>
           ) : (
-            <Button variant="primary" className="generate-button" onClick={onOpenConnection}>
-              연결 설정 <CornerDownLeft size={15} />
+            <Button variant="primary" className="generate-button" onClick={onOpenStatus}>
+              API 상태 <CornerDownLeft size={15} />
             </Button>
           )}
         </div>
@@ -143,11 +143,11 @@ export function PromptDock({
         </div>
 
         <div className="prompt-options-mobile">
-          <select aria-label="모바일 설치 모델" value={model} disabled={models.length === 0} onChange={(event) => onModelChange(event.target.value)}>
-            {!model ? <option value="">{modelsLoading ? '모델 확인 중…' : '설치 모델 선택'}</option> : null}
+          <select aria-label="현재 Draw Things 모델" value={model} disabled={models.length === 0} onChange={(event) => onModelChange(event.target.value)}>
+            {!model ? <option value="">{modelsLoading ? '현재 모델 확인 중…' : '현재 모델 확인 불가'}</option> : null}
             {models.map((item) => <option value={item.file} key={item.file}>{item.name ?? item.file}</option>)}
           </select>
-          <IconButton label="설치 모델 목록 새로고침" disabled={modelsLoading} onClick={onRefreshModels}><RefreshCw className={modelsLoading ? 'spin' : undefined} size={15} /></IconButton>
+          <IconButton label="현재 모델 다시 확인" disabled={modelsLoading} onClick={onRefreshModels}><RefreshCw className={modelsLoading ? 'spin' : undefined} size={15} /></IconButton>
           <Button variant="ghost" onClick={onOpenSettings}><SlidersHorizontal size={14} /> 전체 설정</Button>
           {modelsError && modelsMessage ? <p className="prompt-model-error" role="alert">{modelsMessage}</p> : null}
         </div>

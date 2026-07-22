@@ -1,22 +1,18 @@
 import type {
-  BridgeHealth,
-  ConnectionConfig,
   ConnectionTestResult,
-  DiscoveredEndpoint,
   GenerationEvent,
   GenerationRequest,
   ModelCatalogResult,
   ServerCapabilities,
 } from '../../domain/types'
 import { EMPTY_CAPABILITIES } from '../defaults'
-import { targetAddressSpaceForHost } from '../network'
 import { sanitizeHttpParameters } from './parameters'
 
+const API_PATH = '/sdapi/v1'
 const DEFAULT_TIMEOUT_MS = 3_500
-
-interface LocalNetworkRequestInit extends RequestInit {
-  targetAddressSpace?: 'loopback' | 'local' | 'public'
-}
+const MAX_JSON_RESPONSE_BYTES = 2 * 1024 * 1024
+const MAX_GENERATION_RESPONSE_BYTES = 128 * 1024 * 1024
+const MAX_GENERATED_IMAGES = 4
 
 export class DrawThingsClientError extends Error {
   constructor(
@@ -29,62 +25,9 @@ export class DrawThingsClientError extends Error {
   }
 }
 
-function hostForUrl(host: string) {
-  const trimmed = host.trim()
-  if (trimmed.startsWith('[') && trimmed.endsWith(']')) return trimmed
-  return trimmed.includes(':') ? `[${trimmed}]` : trimmed
-}
-
-export function drawThingsBaseUrl(connection: ConnectionConfig) {
-  const scheme = connection.tls ? 'https' : 'http'
-  const path = connection.apiBasePath.trim().replace(/^\/+|\/+$/g, '')
-  return `${scheme}://${hostForUrl(connection.host)}:${connection.port}${path ? `/${path}` : ''}`
-}
-
-function normalizeBridgeUrl(url: string) {
-  return url.trim().replace(/\/+$/g, '')
-}
-
-function bridgeHeaders(connection: ConnectionConfig): HeadersInit {
-  const headers: Record<string, string> = { 'content-type': 'application/json' }
-  if (connection.bridgePairingToken) {
-    headers['x-draw-things-pairing-token'] = connection.bridgePairingToken
-  }
-  return headers
-}
-
-function bridgeTargetAddressSpace(connection: ConnectionConfig): LocalNetworkRequestInit['targetAddressSpace'] {
-  try {
-    return targetAddressSpaceForHost(new URL(normalizeBridgeUrl(connection.bridgeUrl)).hostname)
-  } catch {
-    return 'public'
-  }
-}
-
-async function localNetworkPermissionState(
-  addressSpace: LocalNetworkRequestInit['targetAddressSpace'],
-): Promise<PermissionState | undefined> {
-  if (addressSpace === 'public' || typeof navigator === 'undefined' || !navigator.permissions?.query) {
-    return undefined
-  }
-  const names = addressSpace === 'loopback'
-    ? ['loopback-network', 'local-network-access']
-    : ['local-network', 'local-network-access']
-  for (const name of names) {
-    try {
-      const status = await navigator.permissions.query({ name } as PermissionDescriptor)
-      return status.state
-    } catch {
-      // Older browsers either use the compatibility alias or do not expose LNA
-      // through the Permissions API. The fetch result remains authoritative.
-    }
-  }
-  return undefined
-}
-
 async function fetchWithTimeout(
   input: RequestInfo | URL,
-  init: LocalNetworkRequestInit = {},
+  init: RequestInit = {},
   timeoutMs = DEFAULT_TIMEOUT_MS,
 ) {
   const controller = new AbortController()
@@ -101,8 +44,31 @@ async function fetchWithTimeout(
   }
 }
 
-async function readJson<T>(response: Response): Promise<T> {
-  const text = await response.text()
+async function readTextWithLimit(response: Response, maximumBytes: number) {
+  const declaredLength = Number(response.headers.get('content-length'))
+  if (Number.isFinite(declaredLength) && declaredLength > maximumBytes) {
+    throw new DrawThingsClientError('Draw Things 응답이 안전한 크기 제한을 초과했습니다.', 'response-too-large')
+  }
+  if (!response.body) return response.text()
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let total = 0
+  let text = ''
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    total += value.byteLength
+    if (total > maximumBytes) {
+      await reader.cancel()
+      throw new DrawThingsClientError('Draw Things 응답이 안전한 크기 제한을 초과했습니다.', 'response-too-large')
+    }
+    text += decoder.decode(value, { stream: true })
+  }
+  return text + decoder.decode()
+}
+
+async function readJson<T>(response: Response, maximumBytes = MAX_JSON_RESPONSE_BYTES): Promise<T> {
+  const text = await readTextWithLimit(response, maximumBytes)
   let body: unknown
   try {
     body = text ? JSON.parse(text) : {}
@@ -113,191 +79,100 @@ async function readJson<T>(response: Response): Promise<T> {
     )
   }
   if (!response.ok) {
-    const message =
-      typeof body === 'object' && body && 'message' in body
-        ? String((body as { message: unknown }).message)
-        : `요청이 실패했습니다. (HTTP ${response.status})`
+    const message = typeof body === 'object' && body && 'message' in body
+      ? String((body as { message: unknown }).message)
+      : `요청이 실패했습니다. (HTTP ${response.status})`
     throw new DrawThingsClientError(message, `http-${response.status}`)
   }
   return body as T
 }
 
-function directCapabilities(): ServerCapabilities {
+function httpCapabilities(): ServerCapabilities {
   return {
     ...EMPTY_CAPABILITIES,
-    protocol: 'http',
     canGenerate: true,
     canImageToImage: true,
-    canCancel: false,
     limitations: [
       'Draw Things HTTP API는 생성 중간 미리보기와 단계별 진행률을 제공하지 않습니다.',
       'HTTP 요청 연결을 끊어도 앱 내부 생성 작업은 계속될 수 있습니다.',
+      'HTTP API는 설치된 모델 전체 목록 대신 현재 선택한 모델만 제공합니다.',
     ],
   }
 }
 
-export async function bridgeHealth(connection: ConnectionConfig): Promise<BridgeHealth> {
-  const response = await fetchWithTimeout(
-    `${normalizeBridgeUrl(connection.bridgeUrl)}/v1/bridge/health`,
-    {
-      headers: bridgeHeaders(connection),
-      targetAddressSpace: bridgeTargetAddressSpace(connection),
-    },
-    1_500,
-  )
-  return readJson<BridgeHealth>(response)
+function validateOptionsResponse(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new DrawThingsClientError('Draw Things options 응답이 JSON 객체가 아닙니다.', 'invalid-response')
+  }
+  const options = value as Record<string, unknown>
+  const numericKeys = ['width', 'height', 'steps'] as const
+  if (typeof options.model !== 'string'
+    || numericKeys.some((key) => typeof options[key] !== 'number' || !Number.isFinite(options[key]))) {
+    throw new DrawThingsClientError('Draw Things options 응답에 필수 생성 설정이 없습니다.', 'invalid-response')
+  }
+  return options
 }
 
-export async function testConnection(
-  connection: ConnectionConfig,
-): Promise<ConnectionTestResult> {
+export async function testConnection(): Promise<ConnectionTestResult> {
   const startedAt = performance.now()
   try {
-    if (connection.transport === 'bridge') {
-      const response = await fetchWithTimeout(
-        `${normalizeBridgeUrl(connection.bridgeUrl)}/v1/test`,
-        {
-          method: 'POST',
-          headers: bridgeHeaders(connection),
-          body: JSON.stringify({ connection }),
-          targetAddressSpace: bridgeTargetAddressSpace(connection),
-        },
-      )
-      const result = await readJson<ConnectionTestResult>(response)
-      return { ...result, latencyMs: Math.round(performance.now() - startedAt) }
-    }
-
-    if (connection.protocol === 'grpc') {
-      return {
-        ok: false,
-        latencyMs: Math.round(performance.now() - startedAt),
-        checkedAt: Date.now(),
-        phase: 'api-mismatch',
-        message: '브라우저의 네이티브 gRPC 연결에는 로컬 커넥터가 필요합니다.',
-        endpoint: drawThingsBaseUrl(connection),
-        capabilities: {
-          ...EMPTY_CAPABILITIES,
-          protocol: 'grpc',
-          requiresHttpModeForCanvas: false,
-          limitations: ['브라우저는 네이티브 gRPC를 직접 호출할 수 없습니다. 로컬 커넥터 연결을 사용하세요.'],
-        },
-        diagnosticCode: 'grpc-requires-bridge',
-      }
-    }
-
-    const response = await fetchWithTimeout(
-      `${drawThingsBaseUrl(connection)}/sdapi/v1/options`,
-      { targetAddressSpace: targetAddressSpaceForHost(connection.host) },
-    )
-    const options = await readJson<Record<string, unknown>>(response)
+    const response = await fetchWithTimeout(`${API_PATH}/options`)
+    const options = validateOptionsResponse(await readJson<unknown>(response))
     return {
       ok: true,
       latencyMs: Math.round(performance.now() - startedAt),
       checkedAt: Date.now(),
       phase: 'online',
-      message: 'Draw Things HTTP API에 직접 연결되었습니다.',
-      endpoint: drawThingsBaseUrl(connection),
-      capabilities: directCapabilities(),
+      message: 'Draw Things HTTP API에 연결되었습니다.',
+      endpoint: `${API_PATH}/options`,
+      capabilities: httpCapabilities(),
       remoteOptions: options,
     }
   } catch (error) {
-    const endpoint = connection.transport === 'bridge'
-      ? normalizeBridgeUrl(connection.bridgeUrl)
-      : drawThingsBaseUrl(connection)
-    const addressSpace = connection.transport === 'bridge'
-      ? bridgeTargetAddressSpace(connection)
-      : targetAddressSpaceForHost(connection.host)
-    const permissionState = await localNetworkPermissionState(addressSpace)
-    const clientError =
-      error instanceof DrawThingsClientError
-        ? error
-        : new DrawThingsClientError(
-            connection.transport === 'bridge'
-              ? '브라우저가 커넥터에 도달하지 못했습니다. 커넥터 주소, Tailscale 연결, HTTPS 인증서와 사이트의 로컬 네트워크 권한을 확인하세요.'
-              : '브라우저가 로컬 API 응답을 읽지 못했습니다. CORS, TLS 또는 로컬 네트워크 권한을 확인하세요.',
-            'cors-or-tls',
-            error,
-          )
-    const permissionDenied = permissionState === 'denied'
-      && (clientError.code === 'cors-or-tls' || clientError.code === 'timeout')
-    const apiMismatch = clientError.code === 'invalid-response' || clientError.code.startsWith('http-')
+    const clientError = error instanceof DrawThingsClientError
+      ? error
+      : new DrawThingsClientError(
+          'Draw Things API에 도달하지 못했습니다. Draw Things와 Mac의 로컬 웹 서버 상태를 확인하세요.',
+          'network-error',
+          error,
+        )
+    const status = clientError.code.startsWith('http-')
+      ? Number(clientError.code.slice(5))
+      : 0
+    const apiMismatch = clientError.code === 'invalid-response'
+      || (status >= 400 && status < 500)
     return {
       ok: false,
       latencyMs: Math.round(performance.now() - startedAt),
       checkedAt: Date.now(),
-      phase: permissionDenied
-        ? 'permission-denied'
-        : clientError.code === 'timeout'
-          ? 'offline'
-          : apiMismatch ? 'api-mismatch' : 'cors-or-tls-blocked',
-      message: permissionDenied
-        ? '이 사이트의 로컬 네트워크 접근이 차단되었습니다. Android Chrome의 사이트 설정에서 로컬 네트워크 권한을 허용한 뒤 다시 테스트하세요.'
-        : clientError.message,
-      endpoint,
-      capabilities: { ...EMPTY_CAPABILITIES, protocol: connection.protocol },
-      diagnosticCode: permissionDenied ? 'local-network-permission-denied' : clientError.code,
+      phase: apiMismatch ? 'api-mismatch' : 'offline',
+      message: clientError.message,
+      endpoint: `${API_PATH}/options`,
+      capabilities: EMPTY_CAPABILITIES,
+      diagnosticCode: clientError.code,
     }
   }
-}
-
-export async function discoverEndpoints(
-  connection: ConnectionConfig,
-): Promise<DiscoveredEndpoint[]> {
-  if (connection.transport !== 'bridge') return []
-  const response = await fetchWithTimeout(
-    `${normalizeBridgeUrl(connection.bridgeUrl)}/v1/discover`,
-    {
-      method: 'POST',
-      headers: bridgeHeaders(connection),
-      body: JSON.stringify({
-        host: connection.host,
-        ports: [...new Set([connection.port, 7859, 7860])],
-        sharedSecret: connection.sharedSecret,
-        clientName: connection.clientName,
-        tlsFingerprintSha256: connection.tlsFingerprintSha256,
-      }),
-      targetAddressSpace: bridgeTargetAddressSpace(connection),
-    },
-    7_000,
-  )
-  const body = await readJson<{ endpoints: DiscoveredEndpoint[] }>(response)
-  return body.endpoints
 }
 
 export async function listInstalledModels(
-  connection: ConnectionConfig,
   currentModel = '',
-  selectedLoRAs: readonly string[] = [],
 ): Promise<ModelCatalogResult> {
-  if (connection.transport !== 'bridge') {
-    const tested = await testConnection(connection)
-    const remoteModel = tested.ok && typeof tested.remoteOptions?.model === 'string'
-      ? tested.remoteOptions.model.trim()
-      : ''
-    const model = remoteModel || currentModel.trim()
-    return {
-      ok: true,
-      models: model ? [{ file: model, name: model, source: 'http-current' }] : [],
-      source: model ? 'http-current' : 'none',
-      checkedAt: Date.now(),
-      stale: false,
-      directoriesScanned: 0,
-      warnings: [tested.ok
-        ? '직접 HTTP 연결은 설치 모델 전체 목록을 제공하지 않아 현재 모델만 표시합니다.'
-        : `현재 모델을 다시 확인하지 못했습니다: ${tested.message}`],
-    }
+  const tested = await testConnection()
+  const remoteModel = tested.ok && typeof tested.remoteOptions?.model === 'string'
+    ? tested.remoteOptions.model.trim()
+    : ''
+  const model = remoteModel || currentModel.trim()
+  return {
+    ok: tested.ok,
+    models: model ? [{ file: model, name: model, source: 'http-current' }] : [],
+    source: model ? 'http-current' : 'none',
+    checkedAt: Date.now(),
+    stale: !tested.ok,
+    directoriesScanned: 0,
+    warnings: [tested.ok
+      ? 'Draw Things HTTP API는 설치 모델 전체 목록을 제공하지 않아 현재 모델만 표시합니다.'
+      : `현재 모델을 다시 확인하지 못했습니다: ${tested.message}`],
   }
-  const response = await fetchWithTimeout(
-    `${normalizeBridgeUrl(connection.bridgeUrl)}/v1/models`,
-    {
-      method: 'POST',
-      headers: bridgeHeaders(connection),
-      body: JSON.stringify({ connection, currentModel, selectedLoRAs }),
-      targetAddressSpace: bridgeTargetAddressSpace(connection),
-    },
-    8_000,
-  )
-  return readJson<ModelCatalogResult>(response)
 }
 
 function stripDataUrl(value: string) {
@@ -323,7 +198,7 @@ export function normalizeGeneratedImage(value: string) {
   return `data:${mime};base64,${compact}`
 }
 
-function directRequestBody(request: GenerationRequest) {
+function requestBody(request: GenerationRequest) {
   const body: Record<string, unknown> = {
     ...sanitizeHttpParameters(request.parameters),
     prompt: request.prompt,
@@ -335,92 +210,30 @@ function directRequestBody(request: GenerationRequest) {
   return body
 }
 
-async function* directGenerate(
-  connection: ConnectionConfig,
+export async function* generate(
   request: GenerationRequest,
   signal?: AbortSignal,
 ): AsyncGenerator<GenerationEvent> {
   const startedAt = performance.now()
   yield { type: 'accepted', requestId: request.id, message: 'Draw Things가 요청을 받았습니다.' }
   const endpoint = request.mode === 'img2img' ? 'img2img' : 'txt2img'
-  const response = await fetch(`${drawThingsBaseUrl(connection)}/sdapi/v1/${endpoint}`, {
+  const response = await fetch(`${API_PATH}/${endpoint}`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(directRequestBody(request)),
+    body: JSON.stringify(requestBody(request)),
     signal,
-    targetAddressSpace: targetAddressSpaceForHost(connection.host),
-  } as LocalNetworkRequestInit)
-  const body = await readJson<{ images: string[] }>(response)
+  })
+  const body = await readJson<unknown>(response, MAX_GENERATION_RESPONSE_BYTES)
+  if (!body || typeof body !== 'object' || !('images' in body)
+    || !Array.isArray(body.images) || body.images.length < 1
+    || body.images.length > MAX_GENERATED_IMAGES
+    || body.images.some((image) => typeof image !== 'string')) {
+    throw new DrawThingsClientError('Draw Things 이미지 응답 형식이 올바르지 않습니다.', 'invalid-generation-response')
+  }
   yield {
     type: 'result',
     requestId: request.id,
     images: body.images.map(normalizeGeneratedImage),
     durationMs: Math.round(performance.now() - startedAt),
   }
-}
-
-async function* bridgeGenerate(
-  connection: ConnectionConfig,
-  request: GenerationRequest,
-  signal?: AbortSignal,
-): AsyncGenerator<GenerationEvent> {
-  const response = await fetch(
-    `${normalizeBridgeUrl(connection.bridgeUrl)}/v1/generate`,
-    {
-      method: 'POST',
-      headers: bridgeHeaders(connection),
-      body: JSON.stringify({ connection, request }),
-      signal,
-      targetAddressSpace: bridgeTargetAddressSpace(connection),
-    } as LocalNetworkRequestInit,
-  )
-  if (!response.ok || !response.body) {
-    await readJson(response)
-    throw new DrawThingsClientError('브리지가 스트림을 열지 못했습니다.', 'bridge-stream')
-  }
-  const reader = response.body.pipeThrough(new TextDecoderStream()).getReader()
-  let pending = ''
-  while (true) {
-    const { value, done } = await reader.read()
-    if (done) break
-    pending += value
-    const lines = pending.split('\n')
-    pending = lines.pop() ?? ''
-    for (const line of lines) {
-      if (!line.trim()) continue
-      yield JSON.parse(line) as GenerationEvent
-    }
-  }
-  if (pending.trim()) yield JSON.parse(pending) as GenerationEvent
-}
-
-export function generate(
-  connection: ConnectionConfig,
-  request: GenerationRequest,
-  signal?: AbortSignal,
-): AsyncGenerator<GenerationEvent> {
-  if (connection.protocol === 'grpc' && connection.transport === 'direct') {
-    throw new DrawThingsClientError(
-      'gRPC 이미지 생성에는 로컬 커넥터 연결이 필요합니다.',
-      'grpc-requires-bridge',
-    )
-  }
-  return connection.transport === 'bridge'
-    ? bridgeGenerate(connection, request, signal)
-    : directGenerate(connection, request, signal)
-}
-
-export async function cancelGeneration(connection: ConnectionConfig, requestId: string) {
-  if (connection.transport !== 'bridge') return false
-  const response = await fetchWithTimeout(
-    `${normalizeBridgeUrl(connection.bridgeUrl)}/v1/cancel/${encodeURIComponent(requestId)}`,
-    {
-      method: 'POST',
-      headers: bridgeHeaders(connection),
-      targetAddressSpace: bridgeTargetAddressSpace(connection),
-    },
-    2_000,
-  )
-  const body = await readJson<{ cancelled: boolean }>(response)
-  return body.cancelled
 }

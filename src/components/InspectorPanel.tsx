@@ -1,10 +1,9 @@
 import { Image as ImageIcon, LoaderCircle, Maximize, RefreshCw, SlidersHorizontal, Sparkles, WandSparkles } from 'lucide-react'
-import type { ApiProtocol, CanvasItem, DrawThingsModel, GenerationParameters, ParameterValue } from '../domain/types'
+import type { CanvasItem, DrawThingsModel, GenerationParameters, ParameterValue } from '../domain/types'
 import { SAMPLERS } from '../lib/draw-things/parameters'
 import { Button, Field, IconButton, TextInput, Toggle } from './ui'
 
 interface InspectorPanelProps {
-  protocol: ApiProtocol
   selected?: CanvasItem
   parameters: GenerationParameters
   models: DrawThingsModel[]
@@ -22,14 +21,14 @@ function number(eventValue: string) {
   return Number.isFinite(value) ? value : 0
 }
 
-export function InspectorPanel({ protocol, selected, parameters, models, modelsLoading, modelsMessage, onRefreshModels, onChange, onOpenAll, onUseSelected, useSelected }: InspectorPanelProps) {
-  const maximumDimension = protocol === 'grpc' ? 4_096 : 8_192
+export function InspectorPanel({ selected, parameters, models, modelsLoading, modelsMessage, onRefreshModels, onChange, onOpenAll, onUseSelected, useSelected }: InspectorPanelProps) {
+  const maximumDimension = 4_096
   return (
     <aside className="inspector-panel">
       <header><span className="eyebrow"><WandSparkles size={13} /> GENERATION</span><h2>생성 설정</h2></header>
       {selected ? (
         <div className="selection-card">
-          <img src={selected.dataUrl} alt="선택한 캔버스 이미지" />
+          {selected.dataUrl ? <img src={selected.dataUrl} alt="선택한 캔버스 이미지" /> : null}
           <div><strong>선택한 이미지</strong><span>{Math.round(selected.width)} × {Math.round(selected.height)} canvas px</span></div>
           <Toggle label="이미지로 이어 그리기" checked={useSelected} onChange={onUseSelected} />
         </div>
@@ -40,21 +39,19 @@ export function InspectorPanel({ protocol, selected, parameters, models, modelsL
       <div className="inspector-scroll">
         <section className="inspector-section">
           <div className="inspector-section__title"><span><Sparkles size={15} /> 모델</span></div>
-          <Field label="설치된 체크포인트" hint={modelsMessage || '로컬 커넥터가 Draw Things 모델 메타데이터를 읽습니다.'}>
+          <Field label="현재 체크포인트" hint={modelsMessage || 'Draw Things HTTP API에서 현재 선택한 모델을 읽습니다.'}>
             <div className="model-picker">
-              {models.length ? (
-                <select aria-label="설치된 모델" value={String(parameters.model ?? '')} onChange={(event) => onChange('model', event.target.value)}>
-                  {!parameters.model ? <option value="">모델을 선택하세요</option> : null}
-                  {parameters.model && !models.some((model) => model.file === parameters.model) ? <option value={String(parameters.model)}>{String(parameters.model)}</option> : null}
-                  {models.map((model) => <option key={model.file} value={model.file}>{model.name ? `${model.name} · ${model.file}` : model.file}</option>)}
-                </select>
-              ) : <TextInput value={String(parameters.model ?? '')} onChange={(event) => onChange('model', event.target.value)} placeholder="커넥터 연결 후 설치 목록을 불러옵니다" />}
-              <IconButton label="설치 모델 목록 새로고침" disabled={modelsLoading} onClick={onRefreshModels}>
+              <select aria-label="현재 Draw Things 모델" value={String(parameters.model ?? '')} disabled={models.length === 0} onChange={(event) => onChange('model', event.target.value)}>
+                {!parameters.model ? <option value="">{modelsLoading ? '현재 모델 확인 중…' : '현재 모델을 확인할 수 없음'}</option> : null}
+                {parameters.model && !models.some((model) => model.file === parameters.model) ? <option value={String(parameters.model)}>{String(parameters.model)}</option> : null}
+                {models.map((model) => <option key={model.file} value={model.file}>{model.name ? `${model.name} · ${model.file}` : model.file}</option>)}
+              </select>
+              <IconButton label="현재 모델 다시 확인" disabled={modelsLoading} onClick={onRefreshModels}>
                 {modelsLoading ? <LoaderCircle className="spin" size={15} /> : <RefreshCw size={15} />}
               </IconButton>
             </div>
           </Field>
-          <p className="model-install-note">새 모델은 Draw Things의 모델 관리에서 설치한 뒤 위 새로고침을 누르세요.</p>
+          <p className="model-install-note">HTTP API는 전체 설치 목록을 제공하지 않습니다. 모델 선택과 설치는 Draw Things에서 한 뒤 위 새로고침을 누르세요.</p>
         </section>
 
         <section className="inspector-section">
