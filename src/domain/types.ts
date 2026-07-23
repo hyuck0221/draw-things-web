@@ -99,6 +99,8 @@ export interface ConversationTurn {
   createdAt: number
   requestId?: string
   effectivePrompt?: string
+  /** Local images the user attached as visual references for this request. */
+  attachmentIds?: string[]
   imageIds?: string[]
   status?: 'generating' | 'complete' | 'error' | 'cancelled'
 }

@@ -450,6 +450,14 @@ function sanitizeTurn(value: unknown, path: string): ConversationTurn {
     }
     safeImageIds = imageIds.map((id, index) => checkedIdentifier(id, `${path}.imageIds[${index}]`))
   }
+  const attachmentIds = record.attachmentIds
+  let safeAttachmentIds: string[] | undefined
+  if (attachmentIds !== undefined) {
+    if (!Array.isArray(attachmentIds) || attachmentIds.length > MAX_SESSION_ITEMS) {
+      throw backupValidationError(`${path}.attachmentIds 값이 올바르지 않습니다.`)
+    }
+    safeAttachmentIds = attachmentIds.map((id, index) => checkedIdentifier(id, `${path}.attachmentIds[${index}]`))
+  }
   const requestId = optionalString(record, 'requestId', path, MAX_IDENTIFIER_LENGTH)
   const effectivePrompt = optionalString(record, 'effectivePrompt', path)
   return {
@@ -459,6 +467,7 @@ function sanitizeTurn(value: unknown, path: string): ConversationTurn {
     createdAt: checkedNumber(record.createdAt, `${path}.createdAt`, 0, 8_640_000_000_000_000),
     ...(requestId ? { requestId } : {}),
     ...(effectivePrompt !== undefined ? { effectivePrompt } : {}),
+    ...(safeAttachmentIds ? { attachmentIds: safeAttachmentIds } : {}),
     ...(safeImageIds ? { imageIds: safeImageIds } : {}),
     ...(status ? { status } : {}),
   }

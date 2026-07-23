@@ -60,12 +60,29 @@ const MAXIMUM_OUTPUT_IMAGES = MAXIMUM_BATCH_COUNT * MAXIMUM_BATCH_SIZE
 const MAXIMUM_TOTAL_PIXELS = 8_192 * 8_192
 const MAXIMUM_INIT_IMAGE_CHARACTERS = 120 * 1024 * 1024
 
+interface PendingReferenceImage {
+  sessionId: string
+  name: string
+  dataUrl: string
+  width: number
+  height: number
+}
+
 function dataUrlDimensions(dataUrl: string) {
   return new Promise<{ width: number; height: number }>((resolve, reject) => {
     const image = new Image()
     image.onload = () => resolve({ width: image.naturalWidth, height: image.naturalHeight })
     image.onerror = reject
     image.src = dataUrl
+  })
+}
+
+function readImageFile(file: File) {
+  return new Promise<string>((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(String(reader.result))
+    reader.onerror = () => reject(reader.error ?? new Error('이미지 파일을 읽지 못했습니다.'))
+    reader.readAsDataURL(file)
   })
 }
 
@@ -104,6 +121,8 @@ export default function App() {
   const [modelsMessage, setModelsMessage] = useState('')
   const [modelsError, setModelsError] = useState(false)
   const [alert, setAlert] = useState<{ kind: 'error' | 'success'; message: string } | null>(null)
+  const [attachedImage, setAttachedImage] = useState<PendingReferenceImage | null>(null)
+  const [attachmentLoading, setAttachmentLoading] = useState(false)
   const [preferenceStorageError, setPreferenceStorageError] = useState<string | null>(null)
   const [backupState, setBackupState] = useState<{
     busy: boolean
@@ -191,7 +210,15 @@ export default function App() {
   const prompt = activeSession?.draftPrompt ?? ''
   const useSelected = Boolean(activeSession?.useSelectedImage)
   const selected = activeSession?.items.find((item) => item.id === activeSession.selectedItemId)
-  const mode: GenerationMode = selected && useSelected ? 'img2img' : 'txt2img'
+  const sessionAttachment = attachedImage && attachedImage.sessionId === activeSession?.id ? attachedImage : undefined
+  const referenceImage = sessionAttachment ?? (selected && useSelected ? {
+    name: '선택한 캔버스 이미지',
+    dataUrl: selected.dataUrl,
+    width: selected.sourceWidth,
+    height: selected.sourceHeight,
+    itemId: selected.id,
+  } : undefined)
+  const mode: GenerationMode = referenceImage ? 'img2img' : 'txt2img'
   const online = monitor.phase === 'online' && Boolean(monitor.result?.ok)
   const capabilities = monitor.result?.capabilities
   const selectedModel = String(preferences.parameters.model ?? '').trim()
@@ -301,6 +328,32 @@ export default function App() {
     }))
   }
 
+  const attachReferenceImage = async (file: File) => {
+    if (!file.type.startsWith('image/')) {
+      setAlert({ kind: 'error', message: '이미지 파일만 참고용으로 첨부할 수 있습니다.' })
+      return
+    }
+    if (file.size === 0 || file.size > 90 * 1024 * 1024) {
+      setAlert({ kind: 'error', message: '참고 이미지는 비어 있지 않아야 하며 90 MiB 이하여야 합니다.' })
+      return
+    }
+    setAttachmentLoading(true)
+    try {
+      const dataUrl = await readImageFile(file)
+      if (dataUrl.length > MAXIMUM_INIT_IMAGE_CHARACTERS) {
+        throw new Error('참고 이미지가 안전한 요청 크기 제한을 초과했습니다.')
+      }
+      const dimensions = await dataUrlDimensions(dataUrl)
+      if (!dimensions.width || !dimensions.height) throw new Error('이미지 크기를 읽지 못했습니다.')
+      if (!activeSession) return
+      setAttachedImage({ sessionId: activeSession.id, name: file.name || '참고 이미지', dataUrl, ...dimensions })
+    } catch (error) {
+      setAlert({ kind: 'error', message: error instanceof Error ? error.message : '참고 이미지를 첨부하지 못했습니다.' })
+    } finally {
+      setAttachmentLoading(false)
+    }
+  }
+
   const failTurn = (sessionId: string, requestId: string, message: string) => {
     workspace.updateSession(sessionId, (session) => ({
       ...session,
@@ -369,7 +422,17 @@ export default function App() {
   }
 
   const startGeneration = async () => {
-    if (!activeSession || !prompt.trim() || generationState.active || generationLock.current) return
+    if (!activeSession || !prompt.trim() || attachmentLoading || generationState.active || generationLock.current) return
+    const requestAttachment = sessionAttachment
+    const requestSelected = !requestAttachment && selected && useSelected ? selected : undefined
+    const requestReference = requestAttachment ?? (requestSelected ? {
+      name: '선택한 캔버스 이미지',
+      dataUrl: requestSelected.dataUrl,
+      width: requestSelected.sourceWidth,
+      height: requestSelected.sourceHeight,
+      itemId: requestSelected.id,
+    } : undefined)
+    const requestMode: GenerationMode = requestReference ? 'img2img' : 'txt2img'
     generationLock.current = true
     try {
       await modelRefreshInFlight.current
@@ -379,7 +442,7 @@ export default function App() {
         setApiStatusOpen(true)
         return
       }
-      if (mode === 'img2img' && !live.capabilities.canImageToImage) {
+      if (requestMode === 'img2img' && !live.capabilities.canImageToImage) {
         setAlert({ kind: 'error', message: '현재 Draw Things HTTP API에서 선택 이미지로 이어 그리기(img2img)를 사용할 수 없습니다.' })
         return
       }
@@ -388,7 +451,9 @@ export default function App() {
       const effectivePrompt = composeEffectivePrompt(activeSession, prompt)
       const requestParameters: GenerationParameters = {
         ...preferences.parameters,
-        ...(mode === 'img2img' && selected ? { width: selected.sourceWidth, height: selected.sourceHeight } : {}),
+        // A newly attached reference can have any native size. Keep the chosen output
+        // size instead of turning a small phone/photo thumbnail into an invalid request.
+        ...(requestSelected ? { width: requestSelected.sourceWidth, height: requestSelected.sourceHeight } : {}),
       }
       const width = Number(requestParameters.width)
       const height = Number(requestParameters.height)
@@ -418,24 +483,44 @@ export default function App() {
         setAlert({ kind: 'error', message: '배치와 업스케일을 포함한 총 출력 해상도는 8192×8192 픽셀 예산을 넘을 수 없습니다.' })
         return
       }
-      if (mode === 'img2img' && selected && selected.dataUrl.length > MAXIMUM_INIT_IMAGE_CHARACTERS) {
-        setAlert({ kind: 'error', message: '선택 이미지가 안전한 요청 크기 제한을 초과했습니다.' })
+      if (requestReference && requestReference.dataUrl.length > MAXIMUM_INIT_IMAGE_CHARACTERS) {
+        setAlert({ kind: 'error', message: '참고 이미지가 안전한 요청 크기 제한을 초과했습니다.' })
         return
       }
-      if (mode === 'txt2img' && (width % 64 !== 0 || height % 64 !== 0)) {
+      if (requestMode === 'txt2img' && (width % 64 !== 0 || height % 64 !== 0)) {
         setAlert({ kind: 'error', message: '텍스트 생성 크기는 Draw Things 블록에 맞게 64의 배수로 설정하세요.' })
         return
       }
       const now = Date.now()
+      const attachmentItem = requestAttachment ? (() => {
+        const display = displayDimensions(requestAttachment.width, requestAttachment.height)
+        return {
+          id: randomUuid(),
+          kind: 'imported' as const,
+          dataUrl: requestAttachment.dataUrl,
+          prompt: `참고 이미지 · ${requestAttachment.name}`,
+          ...nextItemPosition(activeSession.items, display.width, display.height),
+          ...display,
+          sourceWidth: requestAttachment.width,
+          sourceHeight: requestAttachment.height,
+          createdAt: now,
+        }
+      })() : undefined
+      const referenceItemId = attachmentItem?.id ?? requestSelected?.id
       workspace.updateSession(sessionId, (session) => ({
         ...session,
         updatedAt: now,
+        ...(attachmentItem ? { items: [...session.items, attachmentItem], selectedItemId: attachmentItem.id } : {}),
         turns: [
           ...session.turns,
-          { id: randomUuid(), role: 'user', content: prompt.trim(), effectivePrompt, createdAt: now, requestId },
+          {
+            id: randomUuid(), role: 'user', content: prompt.trim(), effectivePrompt, createdAt: now, requestId,
+            ...(attachmentItem ? { attachmentIds: [attachmentItem.id] } : {}),
+          },
           { id: randomUuid(), role: 'assistant', content: '생성 요청을 준비하고 있습니다…', createdAt: now, requestId, status: 'generating' },
         ],
       }))
+      if (requestAttachment) setAttachedImage(null)
       setGenerationState({ active: true, cancellable: true, requestId, sessionId, message: '요청을 전송하고 결과를 기다리고 있습니다…' })
       cancelledRequests.current.delete(requestId)
       terminalRequest.current = null
@@ -443,11 +528,11 @@ export default function App() {
         let terminalEventReceived = false
         const stream = generate({
           id: requestId,
-          mode,
+          mode: requestMode,
           prompt: effectivePrompt,
           negativePrompt: preferences.negativePrompt,
           parameters: requestParameters,
-          initImage: mode === 'img2img' ? selected?.dataUrl : undefined,
+          initImage: requestReference?.dataUrl,
         }, undefined, preferences.apiGatewayUrl)
         for await (const event of stream) {
           if (cancelledRequests.current.has(requestId)) break
@@ -461,7 +546,7 @@ export default function App() {
             terminalEventReceived = true
             terminalRequest.current = requestId
             setGenerationState((current) => ({ ...current, cancellable: false, message: '결과를 캔버스에 추가하는 중입니다…' }))
-            await applyGenerationResult(event, sessionId, effectivePrompt, preferences.negativePrompt, selected?.id, requestParameters)
+            await applyGenerationResult(event, sessionId, effectivePrompt, preferences.negativePrompt, referenceItemId, requestParameters)
             setAlert({ kind: 'success', message: `${event.images.length}개 이미지를 캔버스에 추가했습니다.` })
           } else if (event.type === 'cancelled') {
             terminalEventReceived = true
@@ -612,6 +697,8 @@ export default function App() {
             negativePrompt={preferences.negativePrompt}
             continuation={activeSession.continuationEnabled}
             selected={selected}
+            attachment={sessionAttachment}
+            attachmentLoading={attachmentLoading}
             useSelected={useSelected}
             online={online}
             canGenerate={canGenerate}
@@ -628,6 +715,8 @@ export default function App() {
             onNegativePromptChange={(negativePrompt) => setPreferences((current) => ({ ...current, negativePrompt }))}
             onContinuationChange={(continuationEnabled) => updateActive((session) => ({ ...session, continuationEnabled }))}
             onUseSelectedChange={(useSelectedImage) => updateActive((session) => ({ ...session, useSelectedImage }))}
+            onAttachmentSelect={(file) => { void attachReferenceImage(file) }}
+            onAttachmentRemove={() => setAttachedImage(null)}
             onSubmit={startGeneration}
             onCancel={cancel}
             onOpenStatus={() => setApiStatusOpen(true)}

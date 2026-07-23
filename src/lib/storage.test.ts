@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from 'vitest'
-import type { PersistedPreferences } from '../domain/types'
+import type { ConversationTurn, PersistedPreferences } from '../domain/types'
 import { DEFAULT_PARAMETERS } from './defaults'
 import { loadPreferences, parseLocalDataBackup, savePreferences } from './storage'
 
@@ -123,7 +123,7 @@ function validBackup() {
       title: '옮길 캔버스',
       createdAt: 1,
       updatedAt: 2,
-      turns: [],
+      turns: [] as ConversationTurn[],
       items: [{
         id: 'image-1',
         kind: 'generated',
@@ -147,6 +147,18 @@ function validBackup() {
 }
 
 describe('portable local backup validation', () => {
+  it('preserves reference-image attachments in conversation turns', () => {
+    const backup = validBackup()
+    backup.sessions[0]!.turns = [{
+      id: 'turn-1', role: 'user', content: '이 분위기를 참고해줘', createdAt: 3,
+      attachmentIds: ['image-1'],
+    }]
+
+    expect(parseLocalDataBackup(JSON.stringify(backup)).sessions[0]?.turns[0]).toMatchObject({
+      attachmentIds: ['image-1'],
+    })
+  })
+
   it('sanitizes preferences and hydrates them for the importing origin', () => {
     const parsed = parseLocalDataBackup(
       JSON.stringify(validBackup()),

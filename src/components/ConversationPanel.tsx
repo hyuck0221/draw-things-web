@@ -22,6 +22,7 @@ export function ConversationPanel({
         {session.turns.length === 0 ? (
           <div className="conversation-empty"><Sparkles size={23} /><strong>아직 대화가 없습니다</strong><p>첫 이미지를 만들면 요청과 결과가<br />이 세션 안에 차곡차곡 이어집니다.</p></div>
         ) : session.turns.map((turn) => {
+          const attachments = turn.attachmentIds?.map((id) => session.items.find((item) => item.id === id)).filter(Boolean) ?? []
           const images = turn.imageIds?.map((id) => session.items.find((item) => item.id === id)).filter(Boolean) ?? []
           return (
             <article className={`conversation-turn conversation-turn--${turn.role}`} key={turn.id}>
@@ -29,6 +30,12 @@ export function ConversationPanel({
               <div>
                 <header><strong>{turn.role === 'user' ? '나' : 'Draw Things'}</strong><time>{new Intl.DateTimeFormat('ko', { hour: '2-digit', minute: '2-digit' }).format(turn.createdAt)}</time></header>
                 <p>{turn.content}</p>
+                {attachments.length ? (
+                  <div className="conversation-attachments" aria-label="첨부한 참고 이미지">
+                    {attachments.map((image) => image?.dataUrl ? <img src={image.dataUrl} alt="첨부한 참고 이미지" key={image.id} /> : null)}
+                    <span>참고 이미지</span>
+                  </div>
+                ) : null}
                 {turn.effectivePrompt && turn.effectivePrompt !== turn.content ? <details><summary><Link2 size={12} /> 이어진 실제 프롬프트</summary><code>{turn.effectivePrompt}</code></details> : null}
                 {images.length ? <div className="conversation-images">{images.map((image) => image?.dataUrl ? <img src={image.dataUrl} alt="생성 결과" key={image.id} /> : null)}</div> : null}
                 {turn.status === 'generating' ? <span className="turn-status"><i /> 생성 중</span> : null}

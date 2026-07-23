@@ -1323,6 +1323,64 @@ textarea::placeholder,
   white-space: nowrap;
 }
 
+.prompt-attachment-input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.prompt-attachment {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-height: 50px;
+  margin: 3px 10px 1px 49px;
+  padding: 5px 6px;
+  border: 1px solid rgba(255, 141, 114, 0.16);
+  border-radius: 8px;
+  background: rgba(255, 141, 114, 0.055);
+}
+
+.prompt-attachment img {
+  width: 39px;
+  height: 39px;
+  border-radius: 5px;
+  object-fit: cover;
+}
+
+.prompt-attachment > span {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.prompt-attachment strong,
+.prompt-attachment small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.prompt-attachment strong {
+  color: #e3c3ba;
+  font-size: 9px;
+}
+
+.prompt-attachment small {
+  color: #9c817d;
+  font-size: 8px;
+}
+
+.prompt-attachment .icon-button {
+  width: 26px;
+  height: 26px;
+  margin-left: auto;
+  color: #c6958c;
+}
+
 .prompt-context button:hover {
   color: #b5b2be;
   background: rgba(255, 255, 255, 0.045);
@@ -2009,6 +2067,32 @@ input[type="range"]::-moz-range-thumb {
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 5px;
   margin-top: 9px;
+}
+
+.conversation-attachments {
+  position: relative;
+  display: inline-grid;
+  width: 92px;
+  margin-top: 9px;
+}
+
+.conversation-attachments img {
+  width: 92px;
+  height: 68px;
+  border: 1px solid rgba(255, 141, 114, 0.25);
+  border-radius: 6px;
+  object-fit: cover;
+}
+
+.conversation-attachments span {
+  position: absolute;
+  right: 4px;
+  bottom: 4px;
+  padding: 2px 4px;
+  color: #ffe9e2;
+  border-radius: 3px;
+  background: rgba(0, 0, 0, 0.58);
+  font-size: 7px;
 }
 
 .conversation-images img {

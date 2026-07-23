@@ -5,6 +5,7 @@ import {
   Link2,
   MessageCircleMore,
   MinusCircle,
+  Paperclip,
   RefreshCw,
   SlidersHorizontal,
   Sparkles,
@@ -19,6 +20,8 @@ interface PromptDockProps {
   negativePrompt: string
   continuation: boolean
   selected?: CanvasItem
+  attachment?: { name: string; dataUrl: string }
+  attachmentLoading: boolean
   useSelected: boolean
   online: boolean
   canGenerate: boolean
@@ -35,6 +38,8 @@ interface PromptDockProps {
   onNegativePromptChange: (value: string) => void
   onContinuationChange: (value: boolean) => void
   onUseSelectedChange: (value: boolean) => void
+  onAttachmentSelect: (file: File) => void
+  onAttachmentRemove: () => void
   onSubmit: () => void
   onCancel: () => void
   onOpenStatus: () => void
@@ -49,6 +54,8 @@ export function PromptDock({
   negativePrompt,
   continuation,
   selected,
+  attachment,
+  attachmentLoading,
   useSelected,
   online,
   canGenerate,
@@ -65,6 +72,8 @@ export function PromptDock({
   onNegativePromptChange,
   onContinuationChange,
   onUseSelectedChange,
+  onAttachmentSelect,
+  onAttachmentRemove,
   onSubmit,
   onCancel,
   onOpenStatus,
@@ -75,6 +84,7 @@ export function PromptDock({
 }: PromptDockProps) {
   const [negativeOpen, setNegativeOpen] = useState(Boolean(negativePrompt))
   const textareaRef = useRef<HTMLTextAreaElement>(null)
+  const attachmentInputRef = useRef<HTMLInputElement>(null)
   const fewStepModel = /schnell|turbo|lightning|lcm|distill/i.test(model)
   const shouldWarnAboutSteps = !fewStepModel && Number.isFinite(steps) && steps > 0 && steps < 6
 
@@ -88,7 +98,7 @@ export function PromptDock({
   const submitOnShortcut = (event: KeyboardEvent<HTMLTextAreaElement>) => {
     if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
       event.preventDefault()
-      if (!generating && online && canGenerate && prompt.trim()) onSubmit()
+      if (!generating && !attachmentLoading && online && canGenerate && prompt.trim()) onSubmit()
     }
   }
 
@@ -112,8 +122,37 @@ export function PromptDock({
               <ImageIcon size={13} /> {useSelected ? '선택 이미지로 변형' : '선택 이미지 사용 안 함'}
             </button>
           ) : null}
+          <button
+            type="button"
+            className={attachment ? 'is-active is-image' : ''}
+            onClick={() => attachmentInputRef.current?.click()}
+            title="내 PC의 이미지를 참고 이미지로 첨부합니다. 생성 시 img2img 입력으로 전송됩니다."
+          >
+            <Paperclip size={13} /> {attachmentLoading ? '이미지 준비 중…' : attachment ? '참고 이미지 첨부됨' : '이미지 첨부'}
+          </button>
           <span><MessageCircleMore size={13} /> 이 세션 안에서만 기억</span>
         </div>
+
+        <input
+          ref={attachmentInputRef}
+          className="prompt-attachment-input"
+          type="file"
+          accept="image/*"
+          tabIndex={-1}
+          onChange={(event) => {
+            const file = event.target.files?.[0]
+            event.currentTarget.value = ''
+            if (file) onAttachmentSelect(file)
+          }}
+        />
+
+        {attachment ? (
+          <div className="prompt-attachment">
+            <img src={attachment.dataUrl} alt="첨부한 참고 이미지 미리보기" />
+            <span><strong>{attachment.name}</strong><small>참고 이미지로 전송 · 생성 후 대화에 저장</small></span>
+            <IconButton label="첨부 이미지 제거" onClick={onAttachmentRemove}><MinusCircle size={15} /></IconButton>
+          </div>
+        ) : null}
 
         {shouldWarnAboutSteps ? (
           <div className="low-steps-warning" role="status">
@@ -139,7 +178,7 @@ export function PromptDock({
               {cancellable ? <><Square size={15} fill="currentColor" /> 중단</> : <><Sparkles size={15} /> 마무리 중</>}
             </Button>
           ) : online && canGenerate ? (
-            <Button variant="primary" className="generate-button" disabled={!prompt.trim()} onClick={onSubmit}>
+            <Button variant="primary" className="generate-button" disabled={!prompt.trim() || attachmentLoading} onClick={onSubmit}>
               <Sparkles size={16} /> 생성 <kbd>⌘↵</kbd>
             </Button>
           ) : (

@@ -129,6 +129,36 @@ test('generates and restores a local canvas through the direct HTTP contract', a
   await expect(page.locator('.canvas-item img')).toBeVisible()
 })
 
+test('sends a PC image attachment as a saved visual reference', async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== 'chromium')
+  let generatedBody: Record<string, unknown> | undefined
+  await mockOptions(page, { width: 512, height: 512 })
+  await page.route('**/sdapi/v1/img2img', async (route) => {
+    generatedBody = JSON.parse(route.request().postData() ?? '{}') as Record<string, unknown>
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ images: [png], parameters: {}, info: '' }),
+    })
+  })
+
+  await page.goto('/')
+  await expect(page.getByRole('button', { name: /API 상태: Draw Things 연결됨/ })).toBeVisible()
+  await page.locator('input[type="file"][accept="image/*"]').setInputFiles({
+    name: 'reference.png',
+    mimeType: 'image/png',
+    buffer: Buffer.from(png, 'base64'),
+  })
+  await expect(page.getByText('reference.png')).toBeVisible()
+  await page.getByLabel('이미지 프롬프트').fill('이 색감으로 바다를 그려줘')
+  await page.getByRole('button', { name: /생성/ }).click()
+
+  await expect(page.locator('.canvas-item img')).toHaveCount(2)
+  expect(generatedBody?.init_images).toEqual([png])
+  await page.getByRole('button', { name: '세션 대화 열기' }).click()
+  await expect(page.getByLabel('첨부한 참고 이미지')).toBeVisible()
+})
+
 test('can select a locally installed model when Draw Things options has no current model', async ({ page }, testInfo) => {
   test.skip(testInfo.project.name !== 'chromium')
   let requestedModel = ''
