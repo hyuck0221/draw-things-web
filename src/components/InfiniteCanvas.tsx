@@ -24,7 +24,6 @@ interface InfiniteCanvasProps {
   session: WorkspaceSession
   preview?: string
   generating: boolean
-  progress: number
   onViewChange: (view: CanvasView) => void
   onSelect: (id?: string) => void
   onImport: (dataUrl: string, dimensions: { width: number; height: number }) => void
@@ -52,7 +51,6 @@ export function InfiniteCanvas({
   session,
   preview,
   generating,
-  progress,
   onViewChange,
   onSelect,
   onImport,
@@ -175,7 +173,7 @@ export function InfiniteCanvas({
             </button>
           ))}
           {generating && preview ? (
-            <div className="canvas-preview" style={{ transform: 'translate(40px, 40px)' }}><img src={preview} alt="생성 중 미리보기" /><span>생성 중 · {Math.round(progress)}%</span></div>
+            <div className="canvas-preview" style={{ transform: 'translate(40px, 40px)' }}><img src={preview} alt="생성 중 미리보기" /><span>결과를 준비하고 있습니다…</span></div>
           ) : null}
         </div>
 

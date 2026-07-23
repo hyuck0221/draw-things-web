@@ -193,6 +193,8 @@ test('pauses options polling while an HTTP generation request is pending', async
   await page.getByLabel('이미지 프롬프트').fill('생성 중 heartbeat 중지 검사')
   await page.getByRole('button', { name: /생성/ }).click()
   await generationStarted
+  await expect(page.getByText('Draw Things가 처리 중입니다')).toBeVisible()
+  await expect(page.locator('.generation-progress')).not.toContainText('%')
 
   const requestsAtGenerationStart = optionsRequests
   try {

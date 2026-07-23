@@ -1,4 +1,5 @@
 import {
+  AlertTriangle,
   CornerDownLeft,
   Image as ImageIcon,
   Link2,
@@ -23,8 +24,8 @@ interface PromptDockProps {
   canGenerate: boolean
   generating: boolean
   cancellable: boolean
-  progress: number
   statusMessage: string
+  steps: number
   model: string
   models: DrawThingsModel[]
   modelsLoading: boolean
@@ -40,6 +41,7 @@ interface PromptDockProps {
   onModelChange: (model: string) => void
   onRefreshModels: () => void
   onOpenSettings: () => void
+  onSetRecommendedSteps: () => void
 }
 
 export function PromptDock({
@@ -52,8 +54,8 @@ export function PromptDock({
   canGenerate,
   generating,
   cancellable,
-  progress,
   statusMessage,
+  steps,
   model,
   models,
   modelsLoading,
@@ -69,9 +71,12 @@ export function PromptDock({
   onModelChange,
   onRefreshModels,
   onOpenSettings,
+  onSetRecommendedSteps,
 }: PromptDockProps) {
   const [negativeOpen, setNegativeOpen] = useState(Boolean(negativePrompt))
   const textareaRef = useRef<HTMLTextAreaElement>(null)
+  const fewStepModel = /schnell|turbo|lightning|lcm|distill/i.test(model)
+  const shouldWarnAboutSteps = !fewStepModel && Number.isFinite(steps) && steps > 0 && steps < 6
 
   useEffect(() => {
     const textarea = textareaRef.current
@@ -90,9 +95,10 @@ export function PromptDock({
   return (
     <div className="prompt-dock-wrap">
       {generating ? (
-        <div className="generation-progress">
-          <div><span><Sparkles size={14} /> {statusMessage || 'Draw Things가 그리고 있습니다'}</span><strong>{Math.round(progress)}%</strong></div>
-          <span className="generation-progress__track"><span style={{ width: `${Math.max(3, progress)}%` }} /></span>
+        <div className="generation-progress" role="status" aria-live="polite">
+          <span className="generation-progress__spinner"><Sparkles size={15} /></span>
+          <span className="generation-progress__copy"><strong>Draw Things가 처리 중입니다</strong><small>{statusMessage || '요청을 전송하고 결과를 기다리고 있습니다…'}</small></span>
+          <span className="generation-progress__dots" aria-hidden="true"><i /><i /><i /></span>
         </div>
       ) : null}
       <section className={`prompt-dock ${generating ? 'is-generating' : ''}`}>
@@ -108,6 +114,14 @@ export function PromptDock({
           ) : null}
           <span><MessageCircleMore size={13} /> 이 세션 안에서만 기억</span>
         </div>
+
+        {shouldWarnAboutSteps ? (
+          <div className="low-steps-warning" role="status">
+            <AlertTriangle size={13} />
+            <span>현재 {steps} 스텝입니다. 이 모델은 결과가 뿌옇게 나올 수 있습니다.</span>
+            <button type="button" onClick={onSetRecommendedSteps}>20 스텝 적용</button>
+          </div>
+        ) : null}
 
         <div className="prompt-main">
           <div className="prompt-mark"><Sparkles size={19} /></div>

@@ -35,6 +35,10 @@ export function configuredGatewayUrl(gatewayUrl?: string) {
   return isVercelOrigin() ? normalizeTailscaleGatewayUrl(gatewayUrl) : undefined
 }
 
+export function shouldOpenInitialConnectionDialog(gatewayUrl?: string, hostname = window.location.hostname) {
+  return isVercelOrigin(hostname) && !normalizeTailscaleGatewayUrl(gatewayUrl)
+}
+
 export function apiRequestUrl(path: string, gatewayUrl?: string) {
   const gateway = configuredGatewayUrl(gatewayUrl)
   if (isVercelOrigin() && !gateway) return undefined

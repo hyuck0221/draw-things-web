@@ -26,7 +26,7 @@ import {
   normalizeGeneratedImage,
 } from './lib/draw-things/client'
 import { DEFAULT_PARAMETERS } from './lib/defaults'
-import { apiConnectionOrigin, isVercelOrigin } from './lib/draw-things/endpoint'
+import { apiConnectionOrigin, shouldOpenInitialConnectionDialog } from './lib/draw-things/endpoint'
 import { PARAMETER_DEFINITIONS } from './lib/draw-things/parameters'
 import { randomUuid } from './lib/ids'
 import { composeEffectivePrompt } from './lib/prompt'
@@ -43,7 +43,6 @@ interface GenerationState {
   cancellable: boolean
   requestId?: string
   sessionId?: string
-  progress: number
   message: string
   preview?: string
 }
@@ -51,7 +50,6 @@ interface GenerationState {
 const IDLE_GENERATION: GenerationState = {
   active: false,
   cancellable: false,
-  progress: 0,
   message: '',
 }
 
@@ -95,7 +93,9 @@ export default function App() {
   const hydratedPreferencesRevision = useRef<number | undefined>(undefined)
   const [preferencesReadyRevision, setPreferencesReadyRevision] = useState<number | undefined>(undefined)
   const workspace = useWorkspace(preferences.activeSessionId)
-  const [apiStatusOpen, setApiStatusOpen] = useState(() => isVercelOrigin())
+  const [apiStatusOpen, setApiStatusOpen] = useState(
+    () => shouldOpenInitialConnectionDialog(preferences.apiGatewayUrl),
+  )
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [conversationOpen, setConversationOpen] = useState(false)
   const [generationState, setGenerationState] = useState<GenerationState>(IDLE_GENERATION)
@@ -436,7 +436,7 @@ export default function App() {
           { id: randomUuid(), role: 'assistant', content: '생성 요청을 준비하고 있습니다…', createdAt: now, requestId, status: 'generating' },
         ],
       }))
-      setGenerationState({ active: true, cancellable: true, requestId, sessionId, progress: 0, message: '연결을 확인하고 요청을 전송합니다' })
+      setGenerationState({ active: true, cancellable: true, requestId, sessionId, message: '요청을 전송하고 결과를 기다리고 있습니다…' })
       cancelledRequests.current.delete(requestId)
       terminalRequest.current = null
       try {
@@ -452,15 +452,15 @@ export default function App() {
         for await (const event of stream) {
           if (cancelledRequests.current.has(requestId)) break
           if (event.type === 'accepted') {
-            setGenerationState((current) => ({ ...current, progress: 4, message: event.message }))
+            setGenerationState((current) => ({ ...current, message: event.message }))
           } else if (event.type === 'progress') {
-            setGenerationState((current) => ({ ...current, progress: event.progress, message: event.message ?? `샘플링 ${event.step ?? ''}` }))
+            setGenerationState((current) => ({ ...current, message: event.message ?? 'Draw Things가 이미지를 처리하고 있습니다…' }))
           } else if (event.type === 'preview') {
             setGenerationState((current) => ({ ...current, preview: normalizeGeneratedImage(event.image) }))
           } else if (event.type === 'result') {
             terminalEventReceived = true
             terminalRequest.current = requestId
-            setGenerationState((current) => ({ ...current, cancellable: false, progress: 100, message: '결과를 캔버스에 추가하는 중입니다…' }))
+            setGenerationState((current) => ({ ...current, cancellable: false, message: '결과를 캔버스에 추가하는 중입니다…' }))
             await applyGenerationResult(event, sessionId, effectivePrompt, preferences.negativePrompt, selected?.id, requestParameters)
             setAlert({ kind: 'success', message: `${event.images.length}개 이미지를 캔버스에 추가했습니다.` })
           } else if (event.type === 'cancelled') {
@@ -602,7 +602,6 @@ export default function App() {
             session={activeSession}
             preview={generationState.preview}
             generating={generationState.active}
-            progress={generationState.progress}
             onViewChange={(view) => updateActive((session) => ({ ...session, view }))}
             onSelect={(selectedItemId) => updateActive((session) => ({ ...session, selectedItemId }))}
             onImport={importImage}
@@ -618,8 +617,8 @@ export default function App() {
             canGenerate={canGenerate}
             generating={generationState.active}
             cancellable={generationState.cancellable}
-            progress={generationState.progress}
             statusMessage={generationState.message}
+            steps={Number(preferences.parameters.steps ?? 0)}
             model={String(preferences.parameters.model ?? '')}
             models={models}
             modelsLoading={modelsLoading}
@@ -635,6 +634,7 @@ export default function App() {
             onModelChange={changeModel}
             onRefreshModels={refreshCurrentModel}
             onOpenSettings={() => setSettingsOpen(true)}
+            onSetRecommendedSteps={() => updateParameter('steps', 20)}
           />
         </main>
         <InspectorPanel selected={selected} parameters={preferences.parameters} models={models} modelsLoading={modelsLoading} modelsMessage={modelsMessage} onRefreshModels={refreshCurrentModel} onChange={updateParameter} onOpenAll={() => setSettingsOpen(true)} onUseSelected={() => updateActive((session) => ({ ...session, useSelectedImage: !session.useSelectedImage }))} useSelected={useSelected} />
