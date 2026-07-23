@@ -11,7 +11,6 @@ interface SessionRailProps {
   onSelect: (id: string) => void
   onDelete: (id: string) => void
 }
-
 function relativeTime(timestamp: number) {
   const minutes = Math.floor((Date.now() - timestamp) / 60_000)
   if (minutes < 1) return '방금 전'
@@ -47,7 +46,11 @@ export function SessionRail({ sessions, activeId, collapsed, onCollapsedChange, 
                   </span>
                 ) : null}
               </button>
-              {!collapsed ? <IconButton label={`${session.title} 삭제`} onClick={() => onDelete(session.id)}><Trash2 size={13} /></IconButton> : null}
+              <IconButton
+                className="session-entry__delete"
+                label={`${session.title} 삭제`}
+                onClick={() => onDelete(session.id)}
+              ><Trash2 size={13} /></IconButton>
             </div>
           )
         })}
@@ -56,4 +59,3 @@ export function SessionRail({ sessions, activeId, collapsed, onCollapsedChange, 
     </aside>
   )
 }
-

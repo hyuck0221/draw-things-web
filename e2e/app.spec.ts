@@ -87,6 +87,7 @@ test('keeps the essential workflow usable on a phone-sized viewport', async ({ p
   await expect(mobileOptions.getByLabel('현재 Draw Things 모델').locator('option')).toHaveCount(2)
   await mobileOptions.getByRole('button', { name: '현재 모델 다시 확인' }).click()
   await expect(mobileOptions.getByLabel('현재 Draw Things 모델')).toHaveValue('mock.ckpt')
+  await expect(page.getByRole('button', { name: '새 캔버스 삭제' })).toBeVisible()
 
   await page.getByRole('button', { name: '전체 설정' }).click()
   await expect(page.getByRole('complementary', { name: '전체 생성 설정' })).toBeVisible()

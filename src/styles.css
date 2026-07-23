@@ -812,7 +812,7 @@ textarea::placeholder,
   background: transparent;
 }
 
-.session-entry > .icon-button {
+.session-entry > .session-entry__delete {
   width: 27px;
   height: 27px;
   opacity: 0;
@@ -822,8 +822,8 @@ textarea::placeholder,
   background: rgba(255, 255, 255, 0.035);
 }
 
-.session-entry:hover > .icon-button,
-.session-entry:focus-within > .icon-button {
+.session-entry:hover > .session-entry__delete,
+.session-entry:focus-within > .session-entry__delete {
   opacity: 1;
 }
 
@@ -891,6 +891,10 @@ textarea::placeholder,
 .session-rail.is-collapsed .session-entry__preview {
   width: 36px;
   height: 36px;
+}
+
+.session-rail.is-collapsed .session-entry__delete {
+  display: none;
 }
 
 .session-rail > footer {
@@ -2684,7 +2688,7 @@ input[type="range"]::-moz-range-thumb {
   .session-rail > header > span,
   .session-rail .new-session span,
   .session-rail .session-entry__copy,
-  .session-rail .session-entry > .icon-button,
+  .session-rail .session-entry > .icon-button:not(.session-entry__delete),
   .session-rail > footer {
     display: none;
   }
@@ -2706,6 +2710,28 @@ input[type="range"]::-moz-range-thumb {
   .session-rail .session-entry__preview {
     width: 36px;
     height: 36px;
+  }
+
+  .session-rail .session-entry > .session-entry__delete {
+    position: absolute;
+    z-index: 1;
+    top: -2px;
+    right: -2px;
+    display: grid;
+    width: 27px;
+    height: 27px;
+    opacity: 1;
+    color: #ffd9df;
+    border-color: rgba(255, 123, 135, 0.42);
+    background: rgba(96, 34, 45, 0.95);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+  }
+
+  .session-rail .session-entry > .session-entry__delete:hover:not(:disabled),
+  .session-rail .session-entry > .session-entry__delete:focus-visible {
+    color: #fff;
+    border-color: rgba(255, 123, 135, 0.72);
+    background: #a43d50;
   }
 
   .top-bar {
