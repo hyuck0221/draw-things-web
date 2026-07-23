@@ -2372,6 +2372,45 @@ input[type="range"]::-moz-range-thumb {
   line-height: 1.55;
 }
 
+.gateway-url-field {
+  display: grid;
+  gap: 5px;
+  margin-top: 4px;
+}
+
+.gateway-url-field > span {
+  color: #c7b993;
+  font-size: 9px;
+  font-weight: 650;
+}
+
+.gateway-url-field .text-input {
+  min-width: 0;
+  border-color: rgba(224, 201, 149, 0.2);
+  background: rgba(13, 12, 15, 0.4);
+  color: #e7dfc7;
+  font-family: ui-monospace, "SFMono-Regular", Menlo, monospace;
+  font-size: 10px;
+}
+
+.gateway-url-field small,
+.gateway-url-error {
+  color: #a99774;
+  font-size: 8.5px;
+  line-height: 1.45;
+}
+
+.gateway-url-error {
+  color: #e3a19d;
+}
+
+.gateway-url-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  margin-top: 2px;
+}
+
 .api-origin-warning code,
 .api-status-help code {
   overflow-wrap: anywhere;

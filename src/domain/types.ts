@@ -128,6 +128,8 @@ export interface PersistedPreferences {
   parameters: GenerationParameters
   activeSessionId?: string
   hydratedApiOrigin?: string
+  /** Saved only in this browser origin; omitted from portable backups. */
+  apiGatewayUrl?: string
   negativePrompt: string
   advancedPanelOpen: boolean
   compactSidebar: boolean

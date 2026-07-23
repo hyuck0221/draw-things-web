@@ -7,6 +7,7 @@ import type {
   WorkspaceSession,
 } from '../domain/types'
 import { DEFAULT_PREFERENCES } from './defaults'
+import { normalizeTailscaleGatewayUrl } from './draw-things/endpoint'
 
 const PREFERENCES_KEY = 'draw-things-local-canvas:preferences:v2'
 const LEGACY_PREFERENCES_KEY = 'draw-things-local-canvas:preferences:v1'
@@ -241,6 +242,9 @@ function mergePreferences(
       : {}),
     ...(typeof value.hydratedApiOrigin === 'string'
       ? { hydratedApiOrigin: value.hydratedApiOrigin }
+      : {}),
+    ...(normalizeTailscaleGatewayUrl(value.apiGatewayUrl)
+      ? { apiGatewayUrl: normalizeTailscaleGatewayUrl(value.apiGatewayUrl) }
       : {}),
     negativePrompt: typeof value.negativePrompt === 'string'
       ? value.negativePrompt

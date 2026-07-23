@@ -4,9 +4,11 @@ import { testConnection } from '../lib/draw-things/client'
 
 export function useConnectionMonitor({
   busy,
+  gatewayUrl,
   onRemoteOptions,
 }: {
   busy: boolean
+  gatewayUrl?: string
   onRemoteOptions: (options: Record<string, unknown>) => void
 }) {
   const [phase, setPhase] = useState<ConnectionPhase>('connecting')
@@ -20,7 +22,7 @@ export function useConnectionMonitor({
     const execute = async () => {
       setTesting(true)
       try {
-        const next = await testConnection()
+        const next = await testConnection(gatewayUrl)
         setResult(next)
         if (next.ok) {
           failures.current = 0
@@ -48,7 +50,7 @@ export function useConnectionMonitor({
     } finally {
       if (inFlight.current === operation) inFlight.current = null
     }
-  }, [onRemoteOptions])
+  }, [gatewayUrl, onRemoteOptions])
 
   useEffect(() => {
     if (!busy) void test()

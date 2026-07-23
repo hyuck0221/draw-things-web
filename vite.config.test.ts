@@ -16,6 +16,8 @@ describe('Draw Things API route guard', () => {
     expect(apiRequestKind('/sdapi/v1/txt2img', 'POST')).toBe('generation')
     expect(apiRequestKind('/sdapi/v1/img2img', 'POST')).toBe('generation')
     expect(apiRequestKind('/local-api/v1/models', 'GET')).toBe('models')
+    expect(apiRequestKind('/local-api/v1/models', 'OPTIONS')).toBe('preflight')
+    expect(apiRequestKind('/sdapi/v1/txt2img', 'OPTIONS')).toBe('preflight')
     expect(apiRequestKind('/local-api/v1/models', 'POST')).toBe('rejected')
     expect(apiRequestKind('/sdapi/v1/options', 'DELETE')).toBe('rejected')
     expect(apiRequestKind('/sdapi/v1/sd-models', 'GET')).toBe('rejected')
@@ -110,6 +112,22 @@ function requestStatus(
     })
     request.once('error', reject)
     request.end(body)
+  })
+}
+
+function requestDetails(
+  port: number,
+  path: string,
+  method: string,
+  headers: Record<string, string | number>,
+) {
+  return new Promise<{ status: number, headers: import('node:http').IncomingHttpHeaders }>((resolve, reject) => {
+    const request = requestHttp({ hostname: '127.0.0.1', port, path, method, headers }, (response) => {
+      response.resume()
+      response.once('end', () => resolve({ status: response.statusCode ?? 0, headers: response.headers }))
+    })
+    request.once('error', reject)
+    request.end()
   })
 }
 
@@ -234,6 +252,27 @@ describe.sequential('Draw Things API gateway sockets', () => {
       'content-type': 'application/json',
       'content-length': Buffer.byteLength(validBody),
     })).resolves.toBe(200)
+  })
+
+  it('permits Vercel-origin CORS preflight through a local Tailscale Serve proxy', async () => {
+    const headers = {
+      host: `localhost:${gatewayPort}`,
+      origin: 'https://draw-things-web.vercel.app',
+      'access-control-request-method': 'POST',
+      'access-control-request-headers': 'content-type',
+      'access-control-request-private-network': 'true',
+    }
+    await expect(requestDetails(gatewayPort, '/sdapi/v1/txt2img', 'OPTIONS', headers)).resolves.toMatchObject({
+      status: 204,
+      headers: {
+        'access-control-allow-origin': 'https://draw-things-web.vercel.app',
+        'access-control-allow-private-network': 'true',
+      },
+    })
+    await expect(requestDetails(gatewayPort, '/sdapi/v1/txt2img', 'OPTIONS', {
+      ...headers,
+      origin: 'https://untrusted.example',
+    })).resolves.toMatchObject({ status: 403 })
   })
 
   it('keeps the generation lock until Draw Things ends after the browser disconnects', async () => {

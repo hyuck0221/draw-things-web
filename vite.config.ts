@@ -23,6 +23,8 @@ const MAXIMUM_BATCH_SIZE = 4
 const MAXIMUM_OUTPUT_IMAGES = MAXIMUM_BATCH_COUNT * MAXIMUM_BATCH_SIZE
 const MAXIMUM_TOTAL_PIXELS = 8_192 * 8_192
 const OPTIONS_TIMEOUT_MS = 5_000
+const DEFAULT_ALLOWED_WEB_ORIGIN = 'https://draw-things-web.vercel.app'
+const CORS_VARY = 'Origin, Access-Control-Request-Method, Access-Control-Request-Headers, Access-Control-Request-Private-Network'
 const SECURITY_HEADERS = {
   'content-security-policy': "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; font-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'; worker-src 'self' blob:",
   'permissions-policy': 'camera=(), microphone=(), geolocation=(), payment=(), usb=()',
@@ -75,6 +77,48 @@ function configuredAllowedHosts() {
     .split(',')
     .map((value) => normalizedHost(value.trim()))
     .filter(Boolean)
+}
+
+function normalizedWebOrigin(value: string | undefined) {
+  if (!value || value.includes(',')) return ''
+  try {
+    const parsed = new URL(value)
+    if (parsed.protocol !== 'https:'
+      || parsed.username
+      || parsed.password
+      || (parsed.pathname !== '/' && parsed.pathname !== '')
+      || parsed.search
+      || parsed.hash) return ''
+    return parsed.origin
+  } catch {
+    return ''
+  }
+}
+
+function configuredAllowedWebOrigins() {
+  return (process.env.DRAW_THINGS_ALLOWED_ORIGINS ?? DEFAULT_ALLOWED_WEB_ORIGIN)
+    .split(',')
+    .map((value) => normalizedWebOrigin(value.trim()))
+    .filter(Boolean)
+}
+
+function allowedCorsOrigin(request: IncomingMessage, allowedOrigins: Set<string>) {
+  const rawOrigin = request.headers.origin
+  if (rawOrigin === undefined) return undefined
+  if (typeof rawOrigin !== 'string') return ''
+  const origin = normalizedWebOrigin(rawOrigin)
+  return origin && allowedOrigins.has(origin) ? origin : ''
+}
+
+function applyCorsHeaders(request: IncomingMessage, response: ServerResponse, origin: string) {
+  response.setHeader('access-control-allow-origin', origin)
+  response.setHeader('access-control-allow-methods', 'GET, POST, OPTIONS')
+  response.setHeader('access-control-allow-headers', 'content-type')
+  response.setHeader('access-control-max-age', '600')
+  response.setHeader('vary', CORS_VARY)
+  if (request.headers['access-control-request-private-network'] === 'true') {
+    response.setHeader('access-control-allow-private-network', 'true')
+  }
 }
 
 function canReply(response: ServerResponse) {
@@ -132,16 +176,14 @@ export function apiRequestKind(rawUrl: string, method: string | undefined) {
   const queryIndex = rawUrl.indexOf('?')
   const pathname = rawUrl.slice(0, queryIndex < 0 ? rawUrl.length : queryIndex)
   const normalizedMethod = method?.toUpperCase() ?? ''
-  if (pathname.startsWith('/local-api')) {
-    if (normalizedMethod === 'GET' && pathname === '/local-api/v1/models') return 'models' as const
-    return 'rejected' as const
-  }
-  if (!pathname.startsWith('/sdapi')) return 'unrelated' as const
-  if (normalizedMethod === 'GET' && pathname === '/sdapi/v1/options') return 'options' as const
-  if (normalizedMethod === 'POST'
-    && (pathname === '/sdapi/v1/txt2img' || pathname === '/sdapi/v1/img2img')) {
-    return 'generation' as const
-  }
+  const modelPath = pathname === '/local-api/v1/models'
+  const optionsPath = pathname === '/sdapi/v1/options'
+  const generationPath = pathname === '/sdapi/v1/txt2img' || pathname === '/sdapi/v1/img2img'
+  if (normalizedMethod === 'OPTIONS' && (modelPath || optionsPath || generationPath)) return 'preflight' as const
+  if (normalizedMethod === 'GET' && modelPath) return 'models' as const
+  if (normalizedMethod === 'GET' && optionsPath) return 'options' as const
+  if (normalizedMethod === 'POST' && generationPath) return 'generation' as const
+  if (!pathname.startsWith('/local-api') && !pathname.startsWith('/sdapi')) return 'unrelated' as const
   return 'rejected' as const
 }
 
@@ -314,6 +356,7 @@ export function createDrawThingsApiMiddleware() {
     .map((value) => normalizedAddress(value.trim()))
     .filter(Boolean))
   const allowedHosts = new Set(configuredAllowedHosts())
+  const allowedWebOrigins = new Set(configuredAllowedWebOrigins())
   let activeGeneration = false
   let activeOptionsRequests = 0
   let activeModelCatalogRequest: Promise<LocalModelCatalog> | null = null
@@ -367,6 +410,13 @@ export function createDrawThingsApiMiddleware() {
     for (const [name, value] of Object.entries(SECURITY_HEADERS)) response.setHeader(name, value)
     response.setHeader('cache-control', 'no-store')
 
+    const corsOrigin = allowedCorsOrigin(request, allowedWebOrigins)
+    if (request.headers.origin !== undefined && !corsOrigin) {
+      sendError(response, 403, '이 웹 주소에서는 Draw Things API 사용이 허용되지 않았습니다.')
+      return
+    }
+    if (corsOrigin) applyCorsHeaders(request, response, corsOrigin)
+
     const remote = normalizedAddress(request.socket.remoteAddress)
     const local = normalizedAddress(request.socket.localAddress)
     if (!isLoopback(remote) && remote !== local && !allowedClients.has(remote)) {
@@ -376,6 +426,20 @@ export function createDrawThingsApiMiddleware() {
     const host = normalizedHost(request.headers.host)
     if (!host || (!isLoopbackHost(host) && host !== local && !allowedHosts.has(host))) {
       sendError(response, 403, '이 호스트 이름에서는 Draw Things API를 사용할 수 없습니다.')
+      return
+    }
+
+    if (requestKind === 'preflight') {
+      const requestedMethod = request.headers['access-control-request-method']
+      const intendedKind = typeof requestedMethod === 'string'
+        ? apiRequestKind(rawUrl, requestedMethod)
+        : 'rejected'
+      if (!corsOrigin || intendedKind === 'preflight' || intendedKind === 'rejected' || intendedKind === 'unrelated') {
+        sendError(response, 403, '허용되지 않은 CORS 사전 요청입니다.')
+        return
+      }
+      response.writeHead(204, { 'content-length': '0' })
+      response.end()
       return
     }
 
@@ -540,6 +604,8 @@ export default defineConfig({
     host: '127.0.0.1',
     port: 5173,
     strictPort: true,
+    // The API middleware owns the narrow Vercel-origin CORS policy and PNA response.
+    cors: false,
     allowedHosts: configuredAllowedHosts(),
     headers: DEVELOPMENT_SECURITY_HEADERS,
   },
@@ -547,6 +613,8 @@ export default defineConfig({
     host: '127.0.0.1',
     port: 5173,
     strictPort: true,
+    // Vite's default preflight handler is broader and lacks the PNA response header.
+    cors: false,
     allowedHosts: configuredAllowedHosts(),
     headers: SECURITY_HEADERS,
   },

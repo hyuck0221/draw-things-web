@@ -65,10 +65,11 @@ describe('preference storage migration', () => {
     expect(localStorage.getItem(V2_KEY)).not.toContain('legacy-secret')
   })
 
-  it('serializes only the supported v2 preference fields', async () => {
+  it('serializes a validated local gateway URL but drops unsupported connection fields', async () => {
     const preferences = {
       version: 2,
       parameters: { ...DEFAULT_PARAMETERS, steps: 24 },
+      apiGatewayUrl: 'https://hshim.taila7bd14.ts.net/',
       negativePrompt: '',
       advancedPanelOpen: false,
       compactSidebar: false,
@@ -78,7 +79,12 @@ describe('preference storage migration', () => {
     await savePreferences(preferences)
 
     const raw = localStorage.getItem(V2_KEY) ?? ''
-    expect(JSON.parse(raw)).toMatchObject({ version: 2, workspaceRevision: 1, parameters: { steps: 24 } })
+    expect(JSON.parse(raw)).toMatchObject({
+      version: 2,
+      workspaceRevision: 1,
+      parameters: { steps: 24 },
+      apiGatewayUrl: 'https://hshim.taila7bd14.ts.net',
+    })
     expect(raw).not.toContain('connection')
     expect(raw).not.toContain('must-not-persist')
   })
@@ -106,6 +112,7 @@ function validBackup() {
       parameters: { ...DEFAULT_PARAMETERS, width: 768 },
       activeSessionId: 'session-1',
       hydratedApiOrigin: 'https://draw-things-web.vercel.app',
+      apiGatewayUrl: 'https://must-not-be-exported.taila7bd14.ts.net',
       negativePrompt: 'old negative',
       advancedPanelOpen: true,
       compactSidebar: false,
@@ -157,6 +164,7 @@ describe('portable local backup validation', () => {
     expect(parsed.images).toHaveLength(1)
     expect(JSON.stringify(parsed.preferences)).not.toContain('obsoleteConnection')
     expect(JSON.stringify(parsed.preferences)).not.toContain('connection')
+    expect(parsed.preferences.apiGatewayUrl).toBeUndefined()
   })
 
   it('rejects image data that does not belong to a canvas item', () => {

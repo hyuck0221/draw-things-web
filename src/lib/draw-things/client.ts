@@ -7,10 +7,9 @@ import type {
   ServerCapabilities,
 } from '../../domain/types'
 import { EMPTY_CAPABILITIES } from '../defaults'
+import { apiRequestUrl } from './endpoint'
 import { sanitizeHttpParameters } from './parameters'
 
-const API_PATH = '/sdapi/v1'
-const LOCAL_MODEL_PATH = '/local-api/v1/models'
 const DEFAULT_TIMEOUT_MS = 3_500
 const MAX_JSON_RESPONSE_BYTES = 2 * 1024 * 1024
 const MAX_GENERATION_RESPONSE_BYTES = 128 * 1024 * 1024
@@ -127,10 +126,25 @@ function validateOptionsResponse(value: unknown): Record<string, unknown> {
   return options
 }
 
-export async function testConnection(): Promise<ConnectionTestResult> {
+function gatewayRequiredResult(): ConnectionTestResult {
+  return {
+    ok: false,
+    latencyMs: 0,
+    checkedAt: Date.now(),
+    phase: 'api-mismatch',
+    message: 'Tailscale HTTPS 게이트웨이 주소를 먼저 저장하세요.',
+    endpoint: 'Tailscale HTTPS gateway required',
+    capabilities: EMPTY_CAPABILITIES,
+    diagnosticCode: 'gateway-required',
+  }
+}
+
+export async function testConnection(gatewayUrl?: string): Promise<ConnectionTestResult> {
+  const optionsEndpoint = apiRequestUrl('/sdapi/v1/options', gatewayUrl)
+  if (!optionsEndpoint) return gatewayRequiredResult()
   const startedAt = performance.now()
   try {
-    const response = await fetchWithTimeout(`${API_PATH}/options`)
+    const response = await fetchWithTimeout(optionsEndpoint)
     const options = validateOptionsResponse(await readJson<unknown>(response))
     const model = typeof options.model === 'string' ? options.model.trim() : ''
     return {
@@ -141,7 +155,7 @@ export async function testConnection(): Promise<ConnectionTestResult> {
       message: model
         ? 'Draw Things HTTP API에 연결되었습니다.'
         : 'Draw Things HTTP API에 연결되었습니다. 앱에서 생성 모델을 선택하세요.',
-      endpoint: `${API_PATH}/options`,
+      endpoint: optionsEndpoint,
       capabilities: httpCapabilities(model),
       remoteOptions: options,
     }
@@ -164,7 +178,7 @@ export async function testConnection(): Promise<ConnectionTestResult> {
       checkedAt: Date.now(),
       phase: apiMismatch ? 'api-mismatch' : 'offline',
       message: clientError.message,
-      endpoint: `${API_PATH}/options`,
+      endpoint: optionsEndpoint,
       capabilities: EMPTY_CAPABILITIES,
       diagnosticCode: clientError.code,
     }
@@ -177,8 +191,10 @@ interface LocalModelCatalogResponse {
   warnings: string[]
 }
 
-async function fetchLocalModelCatalog(): Promise<LocalModelCatalogResponse> {
-  const response = await fetchWithTimeout(LOCAL_MODEL_PATH)
+async function fetchLocalModelCatalog(gatewayUrl?: string): Promise<LocalModelCatalogResponse> {
+  const endpoint = apiRequestUrl('/local-api/v1/models', gatewayUrl)
+  if (!endpoint) throw new DrawThingsClientError('Tailscale HTTPS 게이트웨이 주소를 먼저 저장하세요.', 'gateway-required')
+  const response = await fetchWithTimeout(endpoint)
   const body = await readJson<unknown>(response)
   if (!body || typeof body !== 'object' || Array.isArray(body)) {
     throw new DrawThingsClientError('로컬 모델 목록 응답이 올바르지 않습니다.', 'invalid-model-catalog')
@@ -205,10 +221,11 @@ async function fetchLocalModelCatalog(): Promise<LocalModelCatalogResponse> {
 
 export async function listInstalledModels(
   currentModel = '',
+  gatewayUrl?: string,
 ): Promise<ModelCatalogResult> {
   const [tested, localCatalog] = await Promise.all([
-    testConnection(),
-    fetchLocalModelCatalog().then(
+    testConnection(gatewayUrl),
+    fetchLocalModelCatalog(gatewayUrl).then(
       (catalog) => ({ catalog }),
       (error: unknown) => ({ error }),
     ),
@@ -282,11 +299,16 @@ function requestBody(request: GenerationRequest) {
 export async function* generate(
   request: GenerationRequest,
   signal?: AbortSignal,
+  gatewayUrl?: string,
 ): AsyncGenerator<GenerationEvent> {
   const startedAt = performance.now()
   yield { type: 'accepted', requestId: request.id, message: 'Draw Things가 요청을 받았습니다.' }
   const endpoint = request.mode === 'img2img' ? 'img2img' : 'txt2img'
-  const response = await fetch(`${API_PATH}/${endpoint}`, {
+  const requestUrl = apiRequestUrl(`/sdapi/v1/${endpoint}`, gatewayUrl)
+  if (!requestUrl) {
+    throw new DrawThingsClientError('Tailscale HTTPS 게이트웨이 주소를 먼저 저장하세요.', 'gateway-required')
+  }
+  const response = await fetch(requestUrl, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(requestBody(request)),

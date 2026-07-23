@@ -26,6 +26,7 @@ import {
   normalizeGeneratedImage,
 } from './lib/draw-things/client'
 import { DEFAULT_PARAMETERS } from './lib/defaults'
+import { apiConnectionOrigin, isVercelOrigin } from './lib/draw-things/endpoint'
 import { PARAMETER_DEFINITIONS } from './lib/draw-things/parameters'
 import { randomUuid } from './lib/ids'
 import { composeEffectivePrompt } from './lib/prompt'
@@ -89,11 +90,6 @@ function makeTitle(prompt: string) {
   return compact.length > 28 ? `${compact.slice(0, 28)}…` : compact || '새 캔버스'
 }
 
-function isVercelOrigin() {
-  return window.location.hostname === 'vercel.app'
-    || window.location.hostname.endsWith('.vercel.app')
-}
-
 export default function App() {
   const [preferences, setPreferences] = useState<PersistedPreferences>(() => loadPreferences())
   const hydratedPreferencesRevision = useRef<number | undefined>(undefined)
@@ -120,6 +116,7 @@ export default function App() {
   const modelRequestSequence = useRef(0)
   const modelRefreshInFlight = useRef<Promise<void> | null>(null)
   const modelCatalogLoadedOrigin = useRef<string | null>(null)
+  const apiOrigin = apiConnectionOrigin(preferences.apiGatewayUrl)
 
   const mergeRemoteOptions = useCallback((remote: Record<string, unknown>) => {
     const validKeys = new Set(PARAMETER_DEFINITIONS.map((definition) => definition.key))
@@ -128,13 +125,12 @@ export default function App() {
       setInstalledModels((current) => current.some((model) => model.file === remoteModel)
         ? current
         : [{ file: remoteModel, name: remoteModel, source: 'http-current' }, ...current])
-      if (modelCatalogLoadedOrigin.current !== window.location.origin) {
+      if (modelCatalogLoadedOrigin.current !== apiOrigin) {
         setModelsMessage('Draw Things에서 현재 선택한 모델입니다.')
         setModelsError(false)
       }
     }
     setPreferences((current) => {
-      const apiOrigin = window.location.origin
       if (current.hydratedApiOrigin === apiOrigin) return current
       const updates: GenerationParameters = {}
       for (const [key, value] of Object.entries(remote)) {
@@ -150,11 +146,12 @@ export default function App() {
         hydratedApiOrigin: apiOrigin,
       }
     })
-  }, [])
+  }, [apiOrigin])
 
   const preferencesReady = !workspace.loading && preferencesReadyRevision === workspace.revision
   const monitor = useConnectionMonitor({
     busy: generationState.active || !preferencesReady,
+    gatewayUrl: preferences.apiGatewayUrl,
     onRemoteOptions: mergeRemoteOptions,
   })
 
@@ -223,6 +220,7 @@ export default function App() {
       try {
         const result = await listInstalledModels(
           String(preferences.parameters.model ?? ''),
+          preferences.apiGatewayUrl,
         )
         if (modelRequestSequence.current !== sequence) return
         setInstalledModels(result.models)
@@ -250,7 +248,7 @@ export default function App() {
       if (modelRefreshInFlight.current === operation) modelRefreshInFlight.current = null
     })
     return operation
-  }, [preferences.parameters.model])
+  }, [preferences.apiGatewayUrl, preferences.parameters.model])
 
   const refreshCurrentModel = useCallback(() => {
     void refreshModels(true)
@@ -258,10 +256,10 @@ export default function App() {
 
   useEffect(() => {
     if (!online || generationState.active
-      || modelCatalogLoadedOrigin.current === window.location.origin) return
-    modelCatalogLoadedOrigin.current = window.location.origin
+      || modelCatalogLoadedOrigin.current === apiOrigin) return
+    modelCatalogLoadedOrigin.current = apiOrigin
     void refreshModels(false)
-  }, [generationState.active, online, refreshModels])
+  }, [apiOrigin, generationState.active, online, refreshModels])
 
   const changeModel = (nextFile: string) => {
     setPreferences((current) => ({
@@ -450,7 +448,7 @@ export default function App() {
           negativePrompt: preferences.negativePrompt,
           parameters: requestParameters,
           initImage: mode === 'img2img' ? selected?.dataUrl : undefined,
-        })
+        }, undefined, preferences.apiGatewayUrl)
         for await (const event of stream) {
           if (cancelledRequests.current.has(requestId)) break
           if (event.type === 'accepted') {
@@ -651,8 +649,19 @@ export default function App() {
           backupBusy={backupState.busy}
           backupMessage={backupState.message}
           backupError={backupState.error}
+          gatewayUrl={preferences.apiGatewayUrl ?? ''}
           onClose={() => setApiStatusOpen(false)}
           onRetry={() => { void monitor.test() }}
+          onGatewaySave={(apiGatewayUrl) => {
+            modelCatalogLoadedOrigin.current = null
+            setInstalledModels([])
+            setModelsMessage('')
+            setModelsError(false)
+            setPreferences((current) => ({
+              ...current,
+              ...(apiGatewayUrl ? { apiGatewayUrl } : { apiGatewayUrl: undefined }),
+            }))
+          }}
           onExportBackup={() => { void exportBackup() }}
           onImportBackup={(file) => { void importBackup(file) }}
         />

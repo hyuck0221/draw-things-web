@@ -10,9 +10,10 @@ import {
   Upload,
   X,
 } from 'lucide-react'
-import { useRef } from 'react'
+import { useRef, useState } from 'react'
 import type { ConnectionTestResult } from '../domain/types'
-import { Button, IconButton } from './ui'
+import { apiRequestUrl, isVercelOrigin, normalizeTailscaleGatewayUrl } from '../lib/draw-things/endpoint'
+import { Button, IconButton, TextInput } from './ui'
 
 interface ConnectionPanelProps {
   open: boolean
@@ -21,15 +22,12 @@ interface ConnectionPanelProps {
   backupBusy: boolean
   backupMessage: string
   backupError: boolean
+  gatewayUrl: string
   onClose: () => void
   onRetry: () => void
+  onGatewaySave: (gatewayUrl: string) => void
   onExportBackup: () => void
   onImportBackup: (file: File) => void
-}
-
-function isVercelOrigin() {
-  return window.location.hostname === 'vercel.app'
-    || window.location.hostname.endsWith('.vercel.app')
 }
 
 export function ConnectionPanel({
@@ -39,18 +37,26 @@ export function ConnectionPanel({
   backupBusy,
   backupMessage,
   backupError,
+  gatewayUrl,
   onClose,
   onRetry,
+  onGatewaySave,
   onExportBackup,
   onImportBackup,
 }: ConnectionPanelProps) {
   const backupInput = useRef<HTMLInputElement>(null)
+  const [gatewayDraft, setGatewayDraft] = useState(gatewayUrl)
   if (!open) return null
 
   const origin = window.location.origin
-  const optionsEndpoint = new URL('/sdapi/v1/options', origin).toString()
+  const apiOptionsRequestUrl = apiRequestUrl('/sdapi/v1/options', gatewayUrl)
+  const optionsEndpoint = apiOptionsRequestUrl?.startsWith('/')
+    ? new URL(apiOptionsRequestUrl, origin).toString()
+    : apiOptionsRequestUrl
   const online = Boolean(result?.ok)
   const hostedOnVercel = isVercelOrigin()
+  const savedGateway = normalizeTailscaleGatewayUrl(gatewayUrl)
+  const normalizedGateway = normalizeTailscaleGatewayUrl(gatewayDraft)
 
   return (
     <div className="modal-backdrop" role="presentation" onMouseDown={(event) => {
@@ -60,9 +66,11 @@ export function ConnectionPanel({
         <header className="api-status-dialog__header">
           <div className="api-status-dialog__icon"><Server size={21} /></div>
           <div>
-            <span className="eyebrow">SAME-ORIGIN API</span>
+            <span className="eyebrow">{hostedOnVercel ? 'TAILSCALE HTTPS GATEWAY' : 'SAME-ORIGIN API'}</span>
             <h2 id="api-status-title">Draw Things API 상태</h2>
-            <p>별도 연결 설정 없이 현재 사이트와 같은 주소로 통신합니다.</p>
+            <p>{hostedOnVercel
+              ? 'Vercel 화면은 Tailscale 내부 HTTPS 게이트웨이로만 API 요청을 보냅니다.'
+              : '별도 연결 설정 없이 현재 사이트와 같은 주소로 통신합니다.'}</p>
           </div>
           <IconButton label="API 상태 닫기" disabled={backupBusy} onClick={onClose}><X size={18} /></IconButton>
         </header>
@@ -72,12 +80,43 @@ export function ConnectionPanel({
             <div className="api-origin-warning" role="alert">
               <AlertTriangle size={19} />
               <div>
-                <strong>Vercel 주소에서는 로컬 이미지를 생성할 수 없습니다.</strong>
+                <strong>Tailscale HTTPS 게이트웨이를 연결하세요.</strong>
                 <p>
-                  Mac에서 이 프로젝트의 로컬 웹 서버를 실행한 뒤 Android에서 Mac의 Tailscale IP와
-                  5173 포트로 접속하세요. 화면과 Draw Things API가 같은 주소에서 제공됩니다.
+                  Mac에서 Tailscale Serve를 켠 뒤 받은 <code>https://…ts.net</code> 주소를 저장하면,
+                  이 Vercel 화면에서만 해당 주소로 생성 요청을 보냅니다.
                 </p>
-                <code>http://&lt;Mac의 Tailscale IP&gt;:5173</code>
+                <label className="gateway-url-field" htmlFor="tailscale-gateway-url">
+                  <span>Mac의 Tailscale Serve URL</span>
+                  <TextInput
+                    id="tailscale-gateway-url"
+                    value={gatewayDraft}
+                    onChange={(event) => setGatewayDraft(event.target.value)}
+                    placeholder="https://hshim.example.ts.net"
+                    inputMode="url"
+                    autoCapitalize="none"
+                    autoCorrect="off"
+                    spellCheck={false}
+                  />
+                  <small>HTTPS · <code>*.ts.net</code> · 경로와 인증 정보 없이 입력하세요. 이 주소는 이 브라우저에만 저장되며 백업에는 포함되지 않습니다.</small>
+                </label>
+                <div className="gateway-url-actions">
+                  <Button
+                    variant="primary"
+                    disabled={!normalizedGateway || normalizedGateway === savedGateway}
+                    onClick={() => {
+                      if (normalizedGateway) onGatewaySave(normalizedGateway)
+                    }}
+                  >
+                    게이트웨이 저장 · 연결 확인
+                  </Button>
+                  {savedGateway ? (
+                    <Button variant="ghost" onClick={() => {
+                      setGatewayDraft('')
+                      onGatewaySave('')
+                    }}>연결 해제</Button>
+                  ) : null}
+                </div>
+                {gatewayDraft.trim() && !normalizedGateway ? <small className="gateway-url-error">Tailscale Serve의 HTTPS <code>*.ts.net</code> 기본 주소만 사용할 수 있습니다.</small> : null}
               </div>
             </div>
           ) : null}
@@ -89,7 +128,7 @@ export function ConnectionPanel({
             </div>
             <div>
               <dt><Server size={14} /> API 확인 경로</dt>
-              <dd>{optionsEndpoint}</dd>
+              <dd>{optionsEndpoint ?? 'Tailscale HTTPS 게이트웨이 주소 설정 필요'}</dd>
             </div>
           </dl>
 
@@ -159,10 +198,10 @@ export function ConnectionPanel({
         </div>
 
         <footer className="api-status-dialog__footer">
-          <small>API 주소는 입력하거나 저장하지 않습니다.</small>
+          <small>{hostedOnVercel ? 'Vercel은 화면 파일만 제공합니다. 생성 데이터는 Tailscale을 통해 Mac으로 직접 전송됩니다.' : 'API 주소는 입력하거나 저장하지 않습니다.'}</small>
           <div>
             <Button variant="ghost" disabled={backupBusy} onClick={onClose}>닫기</Button>
-            <Button variant="primary" disabled={testing || backupBusy || hostedOnVercel} onClick={onRetry}>
+            <Button variant="primary" disabled={testing || backupBusy || (hostedOnVercel && !savedGateway)} onClick={onRetry}>
               {testing ? <LoaderCircle className="spin" size={16} /> : <RefreshCw size={16} />}
               {testing ? '확인 중' : '다시 확인'}
             </Button>
